@@ -2,9 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const dataDir = path.resolve(process.cwd(), 'data');
+const isVercel = !!process.env.VERCEL;
+const dataDir = process.env.DATA_DIR || (isVercel ? '/tmp/data' : path.resolve(process.cwd(), 'data'));
 if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+  } catch {
+    // Fallback to /tmp if current dir is read-only
+  }
 }
 
 const dbPath = path.join(dataDir, 'remotehub.db');

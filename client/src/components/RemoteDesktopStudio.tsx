@@ -16,7 +16,7 @@ import {
   X,
   Volume2
 } from 'lucide-react';
-import { api } from '../services/api';
+import { api, getWsBaseUrl } from '../services/api';
 
 interface RemoteDesktopStudioProps {
   sessionId: string;
@@ -65,9 +65,8 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
 
   // WebSocket Connection
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/client?sessionId=${sessionId}&sessionToken=${sessionToken}`;
+    const wsBase = getWsBaseUrl();
+    const wsUrl = `${wsBase}/ws/client?sessionId=${sessionId}&sessionToken=${sessionToken}`;
 
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "RemoteHub Backend API & WebRTC Signaling Gateway",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

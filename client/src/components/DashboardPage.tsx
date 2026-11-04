@@ -17,7 +17,7 @@ import {
   Cpu,
   HardDrive
 } from 'lucide-react';
-import { api } from '../services/api';
+import { api, getWsBaseUrl } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 interface Device {
@@ -76,8 +76,8 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
     // Setup real-time WebSocket dashboard listener
     if (!user) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/dashboard?userId=${user.id}`);
+    const wsBase = getWsBaseUrl();
+    const ws = new WebSocket(`${wsBase}/ws/dashboard?userId=${user.id}`);
 
     ws.onmessage = (event) => {
       try {

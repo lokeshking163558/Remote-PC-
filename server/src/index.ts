@@ -87,10 +87,14 @@ const server = http.createServer(app);
 // Attach WebSocket server for real-time WebRTC signaling and agent communication
 setupWebSocketServer(server);
 
-server.listen(PORT, () => {
-  console.log(`=======================================================`);
-  console.log(`   RemoteHub Server running on http://localhost:${PORT}`);
-  console.log(`   WebRTC Signaling Gateway: ws://localhost:${PORT}/ws/*`);
-  console.log(`=======================================================`);
-});
+if (!process.env.VERCEL) {
+  server.listen(PORT, () => {
+    console.log(`=======================================================`);
+    console.log(`   RemoteHub Server running on http://localhost:${PORT}`);
+    console.log(`   WebRTC Signaling Gateway: ws://localhost:${PORT}/ws/*`);
+    console.log(`=======================================================`);
+  });
+}
+
+export default app;
 

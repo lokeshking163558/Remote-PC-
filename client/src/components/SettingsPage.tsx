@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { User, Shield, Lock, Key, Check, AlertCircle, LogOut } from 'lucide-react';
+import { User, Shield, Lock, Key, Check, AlertCircle, LogOut, Server } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../services/api';
+import { api, getBackendUrl, setCustomBackendUrl } from '../services/api';
 
 export const SettingsPage: React.FC = () => {
   const { user, logout } = useAuth();
@@ -10,6 +10,19 @@ export const SettingsPage: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [status, setStatus] = useState<{ success?: boolean; message?: string } | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Backend URL configuration
+  const [backendUrlInput, setBackendUrlInput] = useState(getBackendUrl());
+  const [backendSaved, setBackendSaved] = useState(false);
+
+  const handleSaveBackendUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    setCustomBackendUrl(backendUrlInput);
+    setBackendSaved(true);
+    setTimeout(() => {
+      window.location.reload();
+    }, 800);
+  };
 
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,6 +83,47 @@ export const SettingsPage: React.FC = () => {
               <span className="font-semibold text-white text-sm">{user?.email}</span>
             </div>
           </div>
+        </div>
+
+        {/* Backend Server Connection */}
+        <div className="rounded-2xl bg-[#0f1524] border border-gray-800 p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-10 h-10 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20 flex items-center justify-center">
+              <Server className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-white">Backend Server Gateway</h3>
+              <p className="text-xs text-gray-400">WebSocket Signaling & API Endpoint URL</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveBackendUrl} className="space-y-3 max-w-md">
+            <div>
+              <label className="text-xs font-semibold text-gray-300 block mb-1">
+                Server Base URL
+              </label>
+              <input
+                type="text"
+                value={backendUrlInput}
+                onChange={(e) => setBackendUrlInput(e.target.value)}
+                placeholder="e.g. https://your-server.onrender.com or http://localhost:5000"
+                className="w-full py-2.5 px-3 rounded-xl bg-gray-950 border border-gray-700 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
+              />
+              <p className="text-[11px] text-gray-500 mt-1">
+                Leave empty to use default relative path on standalone deployments.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs transition-all shadow-md shadow-purple-600/20"
+              >
+                {backendSaved ? '✓ Saved! Reloading...' : 'Save Server URL'}
+              </button>
+              {backendSaved && <span className="text-xs text-emerald-400">Settings updated</span>}
+            </div>
+          </form>
         </div>
 
         {/* Change Password Card */}
