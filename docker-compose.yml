@@ -1,0 +1,20 @@
+services:
+  remotehub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: remotehub-server
+    restart: always
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - NODE_ENV=production
+      - JWT_SECRET=change-this-in-production-to-a-secure-secret-key-64chars
+      - SESSION_HMAC_SECRET=change-this-in-production-to-another-secure-secret-key-64chars
+    volumes:
+      - remotehub-data:/app/server/data
+
+volumes:
+  remotehub-data:
+

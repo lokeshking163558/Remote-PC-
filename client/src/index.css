@@ -1,0 +1,35 @@
+        @tailwind base;
+        @tailwind components;
+        @tailwind utilities;
+
+        @layer base {
+          body {
+            @apply bg-[#0a0d14] text-slate-100;
+          }
+        }
+
+        /* Custom scrollbars */
+        ::-webkit-scrollbar {
+          width: 6px;
+          height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+          background: #0f172a;
+        }
+
+        ::-webkit-scrollbar-thumb {
+          background: #334155;
+          border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+          background: #475569;
+        }
+
+        /* Remote canvas touch container to prevent browser pinch/zoom bounce */
+        .remote-screen-container {
+          touch-action: none;
+          user-select: none;
+          -webkit-user-select: none;
+        }

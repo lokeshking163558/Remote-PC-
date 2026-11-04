@@ -1,0 +1,371 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Monitor,
+  Laptop,
+  Plus,
+  RefreshCw,
+  Power,
+  Zap,
+  Sliders,
+  MoreVertical,
+  Activity,
+  ShieldCheck,
+  Clock,
+  Trash2,
+  Edit2,
+  Lock,
+  Cpu,
+  HardDrive
+} from 'lucide-react';
+import { api } from '../services/api';
+import { useAuth } from '../context/AuthContext';
+
+interface Device {
+  id: string;
+  deviceName: string;
+  os: string;
+  agentVersion: string;
+  onlineStatus: boolean;
+  lastSeen: number;
+  localIp?: string;
+  macAddress?: string;
+  registeredAt: number;
+  hasPin: boolean;
+  isLocked: boolean;
+  lockoutUntil: number;
+  latestMetrics?: {
+    cpuUsage: number;
+    memoryUsage: number;
+    storageUsage?: number;
+    batteryPercent?: number;
+    isCharging?: boolean;
+  };
+}
+
+interface DashboardPageProps {
+  onConnectDevice: (device: Device) => void;
+  onOpenDetails: (deviceId: string) => void;
+  onAddDevice: () => void;
+}
+
+export const DashboardPage: React.FC<DashboardPageProps> = ({
+  onConnectDevice,
+  onOpenDetails,
+  onAddDevice
+}) => {
+  const { user } = useAuth();
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+
+  const fetchDevices = async () => {
+    try {
+      const res = await api.getDevices();
+      setDevices(res.devices);
+    } catch (err) {
+      console.error('Failed to load devices', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDevices();
+
+    // Setup real-time WebSocket dashboard listener
+    if (!user) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/dashboard?userId=${user.id}`);
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'device:status-change') {
+          setDevices((prev) =>
+            prev.map((d) =>
+              d.id === msg.deviceId
+                ? { ...d, onlineStatus: msg.onlineStatus, lastSeen: msg.lastSeen }
+                : d
+            )
+          );
+        }
+      } catch {}
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [user]);
+
+  const handleRename = async (deviceId: string) => {
+    if (!editName.trim()) return;
+    try {
+      await api.updateDevice(deviceId, { deviceName: editName.trim() });
+      setEditingDeviceId(null);
+      fetchDevices();
+    } catch (err) {
+      console.error('Failed to rename device', err);
+    }
+  };
+
+  const handleDelete = async (deviceId: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to unregister and remove "${name}" from your account?`)) {
+      return;
+    }
+    try {
+      await api.deleteDevice(deviceId);
+      fetchDevices();
+    } catch (err) {
+      console.error('Failed to delete device', err);
+    }
+  };
+
+  const onlineCount = devices.filter((d) => d.onlineStatus).length;
+  const offlineCount = devices.length - onlineCount;
+
+  return (
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* Header & Stats bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+        <div>
+          <h2 className="text-2xl font-bold text-white tracking-tight">Computer Dashboard</h2>
+          <p className="text-xs sm:text-sm text-gray-400 mt-0.5">
+            Monitor and access your registered computers in real-time.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={fetchDevices}
+            title="Refresh devices"
+            className="p-2.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-400 hover:text-white transition-colors"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+
+          <button
+            onClick={onAddDevice}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs sm:text-sm transition-all shadow-md shadow-blue-600/20 active:scale-95"
+          >
+            <Plus className="w-4 h-4" />
+            Add Computer
+          </button>
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 mb-8">
+        <div className="p-4 rounded-2xl bg-[#0f1524] border border-gray-800/80">
+          <div className="text-xs text-gray-400 font-medium mb-1">Total Computers</div>
+          <div className="text-2xl font-bold text-white font-mono">{devices.length}</div>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-[#0f1524] border border-gray-800/80">
+          <div className="text-xs text-emerald-400 font-medium mb-1 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            Online & Ready
+          </div>
+          <div className="text-2xl font-bold text-white font-mono">{onlineCount}</div>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-[#0f1524] border border-gray-800/80">
+          <div className="text-xs text-gray-400 font-medium mb-1 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-gray-500" />
+            Offline / Standby
+          </div>
+          <div className="text-2xl font-bold text-white font-mono">{offlineCount}</div>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-[#0f1524] border border-gray-800/80">
+          <div className="text-xs text-blue-400 font-medium mb-1 flex items-center gap-1.5">
+            <Activity className="w-3.5 h-3.5" />
+            Active Sessions
+          </div>
+          <div className="text-2xl font-bold text-white font-mono">
+            {devices.filter((d) => d.onlineStatus).length > 0 ? 'Ready' : 'Idle'}
+          </div>
+        </div>
+      </div>
+
+      {/* Devices Section */}
+      {loading ? (
+        <div className="p-16 text-center text-gray-400 border border-dashed border-gray-800 rounded-2xl">
+          <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-blue-400" />
+          <p className="text-sm">Querying device registry...</p>
+        </div>
+      ) : devices.length === 0 ? (
+        <div className="p-16 text-center rounded-2xl bg-[#0f1524] border border-gray-800">
+          <div className="w-14 h-14 rounded-2xl bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center justify-center mx-auto mb-4">
+            <Laptop className="w-7 h-7" />
+          </div>
+          <h3 className="text-lg font-bold text-white mb-2">No computers registered yet</h3>
+          <p className="text-sm text-gray-400 max-w-md mx-auto mb-6">
+            Install the RemoteHub desktop agent on your Windows computer to connect and control it remotely from any browser.
+          </p>
+          <button
+            onClick={onAddDevice}
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs sm:text-sm transition-all shadow-md shadow-blue-600/20"
+          >
+            <Plus className="w-4 h-4" />
+            Register Your First Computer
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          {devices.map((device) => {
+            const isOnline = device.onlineStatus;
+            const metrics = device.latestMetrics;
+
+            return (
+              <div
+                key={device.id}
+                className="group relative rounded-2xl bg-[#0f1524] border border-gray-800/80 hover:border-blue-500/30 transition-all p-5 shadow-lg flex flex-col justify-between"
+              >
+                <div>
+                  {/* Card Header */}
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-gray-900 border border-gray-800 flex items-center justify-center text-lg">
+                        {device.os.includes('Win') ? '🪟' : '💻'}
+                      </div>
+                      <div>
+                        {editingDeviceId === device.id ? (
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="text"
+                              value={editName}
+                              onChange={(e) => setEditName(e.target.value)}
+                              className="py-1 px-2 text-xs bg-gray-950 border border-blue-500 rounded text-white font-semibold focus:outline-none"
+                              autoFocus
+                            />
+                            <button
+                              onClick={() => handleRename(device.id)}
+                              className="px-2 py-1 bg-blue-600 text-[10px] rounded font-bold text-white"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <h4 className="font-bold text-white text-base tracking-tight truncate max-w-[170px]">
+                              {device.deviceName}
+                            </h4>
+                            <span
+                              className={`w-2 h-2 rounded-full shrink-0 ${
+                                isOnline ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50' : 'bg-gray-600'
+                              }`}
+                            />
+                          </div>
+                        )}
+                        <p className="text-[11px] text-gray-400 font-medium">
+                          {device.os} • v{device.agentVersion}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Action Menu */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setActiveMenuId(activeMenuId === device.id ? null : device.id)}
+                        className="p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800/60 transition-colors"
+                      >
+                        <MoreVertical className="w-4 h-4" />
+                      </button>
+
+                      {activeMenuId === device.id && (
+                        <div className="absolute right-0 top-8 z-20 w-40 rounded-xl bg-gray-900 border border-gray-800 shadow-xl py-1 text-xs">
+                          <button
+                            onClick={() => {
+                              setEditingDeviceId(device.id);
+                              setEditName(device.deviceName);
+                              setActiveMenuId(null);
+                            }}
+                            className="w-full text-left px-3 py-2 text-gray-300 hover:bg-gray-800 hover:text-white flex items-center gap-2"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                            Rename Device
+                          </button>
+                          <button
+                            onClick={() => {
+                              onOpenDetails(device.id);
+                              setActiveMenuId(null);
+                            }}
+                            className="w-full text-left px-3 py-2 text-gray-300 hover:bg-gray-800 hover:text-white flex items-center gap-2"
+                          >
+                            <Lock className="w-3.5 h-3.5" />
+                            Change Access PIN
+                          </button>
+                          <div className="h-px bg-gray-800 my-1" />
+                          <button
+                            onClick={() => {
+                              handleDelete(device.id, device.deviceName);
+                              setActiveMenuId(null);
+                            }}
+                            className="w-full text-left px-3 py-2 text-red-400 hover:bg-red-500/10 flex items-center gap-2"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Remove Device
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Telemetry Metrics Snippet */}
+                  {metrics ? (
+                    <div className="grid grid-cols-2 gap-2 mb-4 p-2.5 rounded-xl bg-gray-950/60 border border-gray-850 text-xs">
+                      <div className="flex items-center gap-1.5 text-gray-300 font-mono">
+                        <Cpu className="w-3.5 h-3.5 text-blue-400" />
+                        <span>CPU: {metrics.cpuUsage}%</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-gray-300 font-mono">
+                        <Activity className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>RAM: {metrics.memoryUsage}%</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mb-4 py-2 px-3 rounded-xl bg-gray-950/40 border border-gray-850 text-[11px] text-gray-500 flex items-center justify-between">
+                      <span>Status: {isOnline ? 'Online (Awaiting Telemetry)' : 'Offline'}</span>
+                      <span className="font-mono text-[10px]">
+                        {new Date(device.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Security Badge */}
+                  <div className="flex items-center gap-1 text-[11px] text-gray-400 mb-5">
+                    <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Protected with permanent access PIN</span>
+                  </div>
+                </div>
+
+                {/* Card Actions */}
+                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-800/60">
+                  <button
+                    onClick={() => onConnectDevice(device)}
+                    disabled={!isOnline}
+                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white font-semibold text-xs transition-all shadow-md shadow-blue-600/20 active:scale-95"
+                  >
+                    <Power className="w-3.5 h-3.5" />
+                    Connect
+                  </button>
+
+                  <button
+                    onClick={() => onOpenDetails(device.id)}
+                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 hover:text-white font-semibold text-xs transition-colors"
+                  >
+                    <Sliders className="w-3.5 h-3.5" />
+                    Details
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
