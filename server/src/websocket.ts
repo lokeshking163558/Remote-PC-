@@ -1,7 +1,7 @@
 import { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import url from 'node:url';
-import { db } from './db.js';
+import { query, queryOne, execute } from './db.js';
 
 interface ActiveSession {
   sessionId: string;
@@ -51,24 +51,26 @@ export function setupWebSocketServer(httpServer: HttpServer) {
     }
   });
 
-  // Background interval: sweep inactive sessions and clean heartbeats
-  setInterval(() => {
+  // Background interval: sweep inactive devices (every 10s)
+  setInterval(async () => {
     const now = Date.now();
-    // Devices with no heartbeat for > 45 seconds are marked offline
     const staleThreshold = now - 45000;
     try {
-      const offlineDevices: any[] = db.prepare(`
-        SELECT id, user_id, device_name FROM devices WHERE online_status = 1 AND last_seen < ?
-      `).all(staleThreshold);
+      const offlineDevices = await query(`
+        SELECT id, user_id, device_name FROM devices WHERE device_status = 'online' AND last_seen < ?
+      `, [staleThreshold]);
 
       if (offlineDevices.length > 0) {
-        db.prepare('UPDATE devices SET online_status = 0 WHERE online_status = 1 AND last_seen < ?').run(staleThreshold);
+        await execute("UPDATE devices SET device_status = 'offline' WHERE device_status = 'online' AND last_seen < ?", [
+          staleThreshold
+        ]);
 
         for (const dev of offlineDevices) {
           notifyUserDashboard(dev.user_id, {
             type: 'device:status-change',
             deviceId: dev.id,
             onlineStatus: false,
+            deviceStatus: 'offline',
             lastSeen: now
           });
         }
@@ -79,8 +81,8 @@ export function setupWebSocketServer(httpServer: HttpServer) {
   }, 10000);
 }
 
-function handleDashboardConnection(ws: WebSocket, query: any) {
-  const userId = query.userId as string;
+function handleDashboardConnection(ws: WebSocket, queryParams: any) {
+  const userId = queryParams.userId as string;
   if (!userId) {
     ws.close(1008, 'Missing userId');
     return;
@@ -114,35 +116,33 @@ export function notifyUserDashboard(userId: string, message: any) {
   }
 }
 
-function handleAgentConnection(ws: WebSocket, query: any) {
-  const deviceId = query.deviceId as string;
-  const token = query.token as string;
+async function handleAgentConnection(ws: WebSocket, queryParams: any) {
+  const deviceId = queryParams.deviceId as string;
+  const token = queryParams.token as string;
 
   if (!deviceId || !token) {
     ws.close(1008, 'Missing deviceId or authToken');
     return;
   }
 
-  // Validate agent device & token in database
-  const stmt = db.prepare('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?');
-  const device: any = stmt.get(deviceId);
+  // Validate agent in database
+  const device = await queryOne('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?', [deviceId]);
 
   if (!device || device.auth_token !== token) {
     ws.close(1008, 'Invalid device credentials');
     return;
   }
 
-  // Register connected agent
   connectedAgents.set(deviceId, ws);
 
   const now = Date.now();
-  db.prepare('UPDATE devices SET online_status = 1, last_seen = ? WHERE id = ?').run(now, deviceId);
+  await execute("UPDATE devices SET device_status = 'online', last_seen = ? WHERE id = ?", [now, deviceId]);
 
-  // Notify dashboard
   notifyUserDashboard(device.user_id, {
     type: 'device:status-change',
     deviceId,
     onlineStatus: true,
+    deviceStatus: 'online',
     lastSeen: now
   });
 
@@ -153,7 +153,7 @@ function handleAgentConnection(ws: WebSocket, query: any) {
     timestamp: now
   }));
 
-  ws.on('message', (data, isBinary) => {
+  ws.on('message', async (data, isBinary) => {
     try {
       if (isBinary) {
         // Binary frame data (screen capture) -> relay to active client session
@@ -169,14 +169,16 @@ function handleAgentConnection(ws: WebSocket, query: any) {
 
       if (msg.type === 'agent:heartbeat') {
         const timestamp = Date.now();
-        db.prepare('UPDATE devices SET last_seen = ?, local_ip = COALESCE(?, local_ip), mac_address = COALESCE(?, mac_address) WHERE id = ?')
-          .run(timestamp, msg.localIp || null, msg.macAddress || null, deviceId);
+        await execute(
+          'UPDATE devices SET last_seen = ?, local_ip = COALESCE(?, local_ip), mac_address = COALESCE(?, mac_address) WHERE id = ?',
+          [timestamp, msg.localIp || null, msg.macAddress || null, deviceId]
+        );
 
         if (msg.metrics) {
-          db.prepare(`
+          await execute(`
             INSERT INTO device_metrics (device_id, cpu_usage, memory_usage, storage_usage, battery_percent, is_charging, collected_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(
+          `, [
             deviceId,
             msg.metrics.cpuUsage || 0,
             msg.metrics.memoryUsage || 0,
@@ -184,9 +186,8 @@ function handleAgentConnection(ws: WebSocket, query: any) {
             msg.metrics.batteryPercent ?? null,
             msg.metrics.isCharging ? 1 : 0,
             timestamp
-          );
+          ]);
 
-          // Relay metrics to active remote session client
           for (const session of activeSessions.values()) {
             if (session.deviceId === deviceId && session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
               session.clientWs.send(JSON.stringify({
@@ -198,8 +199,11 @@ function handleAgentConnection(ws: WebSocket, query: any) {
         }
 
         ws.send(JSON.stringify({ type: 'server:heartbeat-ack', timestamp }));
+      } else if (msg.type === 'agent:approve-session') {
+        approveSessionAndNotify(msg.sessionId);
+      } else if (msg.type === 'agent:reject-session') {
+        rejectSessionAndNotify(msg.sessionId, msg.reason || 'Host rejected connection');
       } else if (msg.type === 'agent:signal') {
-        // WebRTC signaling from agent to browser client
         const session = activeSessions.get(msg.sessionId);
         if (session && session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
           session.clientWs.send(JSON.stringify({
@@ -218,30 +222,26 @@ function handleAgentConnection(ws: WebSocket, query: any) {
           }));
         }
       } else if (msg.type === 'agent:emergency-disconnect') {
-        // Local user on the computer pressed "Stop Remote Session"
-        const session = activeSessions.get(msg.sessionId);
-        if (session) {
-          endSessionAndNotify(msg.sessionId, 'Remote control was terminated by the host computer');
-        }
+        endSessionAndNotify(msg.sessionId, 'Remote control was terminated locally by the host computer');
       }
     } catch (err) {
       console.error('Error handling agent message:', err);
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', async () => {
     connectedAgents.delete(deviceId);
     const closedNow = Date.now();
-    db.prepare('UPDATE devices SET online_status = 0, last_seen = ? WHERE id = ?').run(closedNow, deviceId);
+    await execute("UPDATE devices SET device_status = 'offline', last_seen = ? WHERE id = ?", [closedNow, deviceId]);
 
     notifyUserDashboard(device.user_id, {
       type: 'device:status-change',
       deviceId,
       onlineStatus: false,
+      deviceStatus: 'offline',
       lastSeen: closedNow
     });
 
-    // Terminate any active sessions for this device
     for (const [sessId, session] of activeSessions.entries()) {
       if (session.deviceId === deviceId) {
         endSessionAndNotify(sessId, 'Desktop Agent disconnected from RemoteHub');
@@ -250,20 +250,21 @@ function handleAgentConnection(ws: WebSocket, query: any) {
   });
 }
 
-function handleClientConnection(ws: WebSocket, query: any) {
-  const sessionId = query.sessionId as string;
-  const sessionToken = query.sessionToken as string;
+async function handleClientConnection(ws: WebSocket, queryParams: any) {
+  const sessionId = queryParams.sessionId as string;
+  const sessionToken = queryParams.sessionToken as string;
 
   if (!sessionId || !sessionToken) {
     ws.close(1008, 'Missing sessionId or sessionToken');
     return;
   }
 
-  // Look up session in DB
-  const stmt = db.prepare('SELECT * FROM remote_sessions WHERE id = ? AND session_token = ?');
-  const session: any = stmt.get(sessionId, sessionToken);
+  const session = await queryOne('SELECT * FROM remote_sessions WHERE id = ? AND session_token = ?', [
+    sessionId,
+    sessionToken
+  ]);
 
-  if (!session || (session.status !== 'authorized' && session.status !== 'active')) {
+  if (!session || (session.session_status !== 'authorized' && session.session_status !== 'active')) {
     ws.close(1008, 'Invalid or expired remote session');
     return;
   }
@@ -280,9 +281,6 @@ function handleClientConnection(ws: WebSocket, query: any) {
     return;
   }
 
-  // Update session status in DB
-  db.prepare('UPDATE remote_sessions SET status = \'active\' WHERE id = ?').run(sessionId);
-
   const active: ActiveSession = {
     sessionId,
     deviceId,
@@ -293,7 +291,7 @@ function handleClientConnection(ws: WebSocket, query: any) {
   };
   activeSessions.set(sessionId, active);
 
-  // Send session request to Agent
+  // Send request to Desktop Agent with required local approval prompt
   agentWs.send(JSON.stringify({
     type: 'server:session-request',
     sessionId,
@@ -304,7 +302,8 @@ function handleClientConnection(ws: WebSocket, query: any) {
   ws.send(JSON.stringify({
     type: 'server:session-connected',
     sessionId,
-    deviceId
+    deviceId,
+    approvalStatus: session.approval_status
   }));
 
   ws.on('message', (data, isBinary) => {
@@ -314,7 +313,6 @@ function handleClientConnection(ws: WebSocket, query: any) {
       const msg = JSON.parse(data.toString());
 
       if (msg.type === 'client:signal') {
-        // WebRTC signaling from client to agent
         if (agentWs.readyState === WebSocket.OPEN) {
           agentWs.send(JSON.stringify({
             type: 'server:signal',
@@ -323,7 +321,6 @@ function handleClientConnection(ws: WebSocket, query: any) {
           }));
         }
       } else if (msg.type === 'client:input') {
-        // Send user input (mouse, keyboard, touch) directly to Agent
         if (agentWs.readyState === WebSocket.OPEN) {
           agentWs.send(JSON.stringify({
             type: 'server:input',
@@ -362,16 +359,48 @@ function handleClientConnection(ws: WebSocket, query: any) {
   });
 }
 
-export function endSessionAndNotify(sessionId: string, reason: string) {
+export function approveSessionAndNotify(sessionId: string) {
+  const session = activeSessions.get(sessionId);
+  if (session) {
+    if (session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
+      session.clientWs.send(JSON.stringify({
+        type: 'server:session-approved',
+        sessionId
+      }));
+    }
+    if (session.agentWs && session.agentWs.readyState === WebSocket.OPEN) {
+      session.agentWs.send(JSON.stringify({
+        type: 'server:start-stream',
+        sessionId
+      }));
+    }
+  }
+}
+
+export function rejectSessionAndNotify(sessionId: string, reason: string) {
+  const session = activeSessions.get(sessionId);
+  if (session) {
+    if (session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
+      session.clientWs.send(JSON.stringify({
+        type: 'server:session-rejected',
+        sessionId,
+        reason
+      }));
+      session.clientWs.close(1000, reason);
+    }
+    activeSessions.delete(sessionId);
+  }
+}
+
+export async function endSessionAndNotify(sessionId: string, reason: string) {
   const session = activeSessions.get(sessionId);
   if (!session) return;
 
   const now = Date.now();
-  db.prepare(`
-    UPDATE remote_sessions
-    SET status = 'ended', ended_at = ?
-    WHERE id = ?
-  `).run(now, sessionId);
+  await execute("UPDATE remote_sessions SET session_status = 'ended', disconnected_at = ? WHERE id = ?", [
+    now,
+    sessionId
+  ]);
 
   if (session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
     session.clientWs.send(JSON.stringify({
@@ -392,4 +421,3 @@ export function endSessionAndNotify(sessionId: string, reason: string) {
 
   activeSessions.delete(sessionId);
 }
-

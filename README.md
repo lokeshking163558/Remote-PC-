@@ -18,12 +18,23 @@ RemoteHub is a production-quality personal remote desktop platform. It enables y
   - Argon2id / Scrypt memory-hard PIN hashing with 32-byte salts and constant-time verification.
   - Progressive rate-limiting delays and automatic 15-minute verification freeze after 5 consecutive failed attempts.
 - **Local Host Security & Safety Indicator**:
+  - Interactive Host Approval: Connecting to a laptop prompts the host user with a 30-second dialog to **Approve** or **Reject** the connection.
   - Top-right floating on-screen indicator appears on the host laptop whenever a remote session is viewing or controlling the screen.
   - Emergency **"Disconnect"** button immediately terminates remote access locally from the laptop.
   - Absolutely zero invisible or covert surveillance.
+- **Enterprise Database & Cloud Ready**: Automatic PostgreSQL schema migrations via `DATABASE_URL` with resilient SQLite fallback for local developer setups.
+- **Automated CI/CD Agent Releases**: Multi-target GitHub Actions workflow builds and publishes verified `RemoteHubAgent.exe` binaries directly on git release tags.
 - **Real-Time Hardware Telemetry**: Live gauges for host CPU usage, RAM usage, disk storage, battery percentage, and AC charging status.
 - **Wake-on-LAN Integration**: Broadcast standard magic packets to wake sleeping PCs across the network.
 - **Remote Clipboard Synchronization**: Seamlessly transfer text between your phone/browser and the remote computer's clipboard.
+
+---
+
+## 📚 Documentation Guides
+
+- 🚀 [Production Deployment Guide (DEPLOYMENT.md)](./DEPLOYMENT.md) — Comprehensive guide for deploying Vercel frontend, Render/Railway/Docker persistent backend, and PostgreSQL database.
+- 💻 [Windows Agent Installation Guide (WINDOWS_AGENT_INSTALLATION.md)](./WINDOWS_AGENT_INSTALLATION.md) — Step-by-step instructions for Windows 10/11, SHA-256 verification, and pairing.
+- 🧪 [Verification & Test Report (TEST_REPORT.md)](./TEST_REPORT.md) — Automated and manual test matrix with 100% pass verification logs.
 
 ---
 
@@ -140,7 +151,7 @@ cd server
 npx tsx src/tests/e2e.test.ts
 ```
 
-All 9 test suites will execute and report live pass/fail results.
+All 10 test suites will execute and report live pass/fail results.
 
 ---
 

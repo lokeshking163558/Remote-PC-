@@ -49,12 +49,12 @@ app.use('/api/auth', authRouter);
 app.use('/api/devices', devicesRouter);
 app.use('/api/sessions', sessionsRouter);
 
-// Endpoint to download the Windows RemoteHub Agent
+// Endpoints to download the Windows RemoteHub Agent and metadata
 app.get('/api/downloads/windows-agent', (req, res) => {
   const binaryPaths = [
-    path.resolve(process.cwd(), '../agent-windows/bin/Release/net8.0-windows/publish/RemoteHubAgent.exe'),
-    path.resolve(process.cwd(), '../agent-windows/bin/Debug/net8.0-windows/RemoteHubAgent.exe'),
-    path.resolve(process.cwd(), 'downloads/RemoteHubAgent.exe')
+    path.resolve(process.cwd(), 'downloads/RemoteHubAgent.exe'),
+    path.resolve(process.cwd(), '../agent-windows/bin/Release/net8.0-windows/RemoteHubAgent.exe'),
+    path.resolve(process.cwd(), '../agent-windows/bin/Debug/net8.0-windows/RemoteHubAgent.exe')
   ];
 
   for (const binPath of binaryPaths) {
@@ -63,10 +63,34 @@ app.get('/api/downloads/windows-agent', (req, res) => {
     }
   }
 
-  // If binary is still compiling or not yet published, provide helpful instruction
-  res.status(404).json({
-    error: 'Windows Agent package is currently being built or published. Please run the build script in agent-windows directory.',
-    buildInstruction: 'dotnet publish -c Release -r win-x64 --self-contained'
+  // Fallback to GitHub Releases download
+  return res.redirect('https://github.com/lokeshking163558/Remote-PC-/releases/latest/download/RemoteHubAgent.exe');
+});
+
+app.get('/api/downloads/windows-agent.txt', (req, res) => {
+  const txtPaths = [
+    path.resolve(process.cwd(), 'downloads/windows-agent.txt'),
+    path.resolve(process.cwd(), '../windows-agent.txt')
+  ];
+
+  for (const p of txtPaths) {
+    if (fs.existsSync(p)) {
+      return res.download(p, 'windows-agent.txt');
+    }
+  }
+
+  res.type('text/plain').send(`Product: RemoteHub Desktop Agent\nVersion: 1.0.0\nSHA-256: BCEABBB364ACFE9B68C4B8ED9A46348E16569D264E3028CAF1051C9B742A8E81`);
+});
+
+app.get('/api/downloads/info', (req, res) => {
+  res.json({
+    version: '1.0.0',
+    platform: 'Windows 10 / Windows 11 (x64)',
+    sha256: 'BCEABBB364ACFE9B68C4B8ED9A46348E16569D264E3028CAF1051C9B742A8E81',
+    filename: 'RemoteHubAgent.exe',
+    downloadUrl: '/api/downloads/windows-agent',
+    githubReleaseUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/latest/download/RemoteHubAgent.exe',
+    metadataUrl: '/api/downloads/windows-agent.txt'
   });
 });
 

@@ -1,0 +1,54 @@
+name: Build & Release Windows Desktop Agent
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build Windows Desktop Agent (Release)
+        run: |
+          dotnet build agent-windows/agent-windows.csproj -c Release
+
+      - name: Compute SHA-256 Checksum
+        shell: pwsh
+        run: |
+          $bin = "agent-windows/bin/Release/net8.0-windows/RemoteHubAgent.exe"
+          $hash = (Get-FileHash $bin -Algorithm SHA256).Hash
+          Set-Content -Path "windows-agent.txt" -Value @"
+          Product: RemoteHub Desktop Agent
+          Version: 1.0.0
+          Platform: Windows 10 / Windows 11 (x64)
+          Framework: Microsoft .NET 8.0 Windows Desktop
+          Executable: RemoteHubAgent.exe
+          SHA-256 Checksum: $hash
+          Release Notes: Production release featuring system tray execution, DXGI screen capture, Win32 SendInput simulation, and host approval prompt.
+          "@
+          Get-Content "windows-agent.txt"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ github.ref_name || 'v1.0.0' }}
+          name: RemoteHub Agent ${{ github.ref_name || 'v1.0.0' }}
+          draft: false
+          prerelease: false
+          files: |
+            agent-windows/bin/Release/net8.0-windows/RemoteHubAgent.exe
+            windows-agent.txt

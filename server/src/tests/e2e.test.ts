@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { db, initDatabase } from '../db.js';
+import { initDatabase, query, queryOne, execute } from '../db.js';
 import {
   hashPassword,
   verifyPassword,
@@ -85,12 +85,10 @@ async function runTests() {
     const valid = verifySessionToken(userId, deviceId, sessionId, token);
     assert.strictEqual(valid, true);
 
-    // Tampered token check
     const tampered = token.slice(0, -4) + '0000';
     const invalidTampered = verifySessionToken(userId, deviceId, sessionId, tampered);
     assert.strictEqual(invalidTampered, false);
 
-    // Wrong device check
     const invalidDevice = verifySessionToken(userId, 'other_dev', sessionId, token);
     assert.strictEqual(invalidDevice, false);
   });
@@ -109,26 +107,31 @@ async function runTests() {
     assert.strictEqual(typeof result, 'boolean');
   });
 
-  // 6. Database Integrity & Isolation
-  await test('Database Schema & Indices Verification', () => {
-    initDatabase();
-    const tables: any[] = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
-    const tableNames = tables.map((t) => t.name);
+  // 6. Database Schema & Adapter Verification
+  await test('Database Schema & Dual-Engine Initialization', async () => {
+    await initDatabase();
+    const testId = `user_${Date.now()}`;
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      testId,
+      'Test User',
+      'Test User',
+      `${testId}@example.com`,
+      'hash_test',
+      Date.now(),
+      Date.now()
+    ]);
 
-    assert.ok(tableNames.includes('users'));
-    assert.ok(tableNames.includes('devices'));
-    assert.ok(tableNames.includes('device_credentials'));
-    assert.ok(tableNames.includes('remote_sessions'));
-    assert.ok(tableNames.includes('device_metrics'));
-    assert.ok(tableNames.includes('audit_logs'));
+    const user = await queryOne('SELECT * FROM users WHERE id = ?', [testId]);
+    assert.ok(user);
+    assert.strictEqual(user.name || user.full_name, 'Test User');
+
+    await execute('DELETE FROM users WHERE id = ?', [testId]);
   });
 
   // 7. PIN Rate Limiting & Lockout Logic Simulation
   await test('PIN Verification 5-attempt Lockout Enforcement', () => {
-    const testDevId = 'test_dev_lockout';
     const { hash, salt } = hashPin('778899');
 
-    // Simulate 5 consecutive failed attempts
     let failedAttempts = 0;
     let lockoutUntil = 0;
 
@@ -144,10 +147,46 @@ async function runTests() {
 
     assert.strictEqual(failedAttempts, 5);
     assert.ok(lockoutUntil > Date.now());
+    assert.strictEqual(lockoutUntil > Date.now(), true);
+  });
 
-    // Verify attempt while locked out
-    const isLocked = lockoutUntil > Date.now();
-    assert.strictEqual(isLocked, true);
+  // 8. Session Approval Flow States
+  await test('Session Approval & Rejection State Transitions', async () => {
+    const sessId = `test_sess_${Date.now()}`;
+    const devId = `test_dev_${Date.now()}`;
+    const usrId = `test_usr_${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId,
+      'Approval Tester',
+      'Approval Tester',
+      `${usrId}@test.com`,
+      'pw_hash',
+      now,
+      now
+    ]);
+
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, last_seen, wake_support, created_at, registered_at)
+      VALUES (?, ?, 'Approval PC', 'Windows 11', '1.0.0', 'online', 'auth_token_test', ?, 1, ?, ?)
+    `, [devId, usrId, now, now, now]);
+
+    await execute(`
+      INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, created_at, started_at)
+      VALUES (?, ?, ?, 'tok_test', 'authorized', 'authorized', 'pending', 'p2p_direct', ?, ?)
+    `, [sessId, usrId, devId, now, now]);
+
+    const pending = await queryOne('SELECT approval_status FROM remote_sessions WHERE id = ?', [sessId]);
+    assert.strictEqual(pending.approval_status, 'pending');
+
+    await execute("UPDATE remote_sessions SET approval_status = 'approved', session_status = 'active' WHERE id = ?", [sessId]);
+    const approved = await queryOne('SELECT approval_status, session_status FROM remote_sessions WHERE id = ?', [sessId]);
+    assert.strictEqual(approved.approval_status, 'approved');
+    assert.strictEqual(approved.session_status, 'active');
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
   });
 
   console.log('\n====================================================');
@@ -160,4 +199,3 @@ async function runTests() {
 }
 
 runTests();
-

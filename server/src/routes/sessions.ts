@@ -1,26 +1,32 @@
 import { Router, Response } from 'express';
-import { db } from '../db.js';
+import { query, queryOne, execute } from '../db.js';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
-import { endSessionAndNotify } from '../websocket.js';
+import { endSessionAndNotify, approveSessionAndNotify, rejectSessionAndNotify } from '../websocket.js';
 
 export const sessionsRouter = Router();
 
-// Get list of active and recent sessions
-sessionsRouter.get('/', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 1. List user sessions
+sessionsRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const stmt = db.prepare(`
+    const sessions = await query(`
       SELECT
-        s.*,
+        s.id,
+        s.device_id,
+        s.session_status,
+        s.approval_status,
+        s.connection_type,
+        s.client_ip,
+        s.created_at AS started_at,
+        s.disconnected_at AS ended_at,
         d.device_name,
-        d.os
+        d.operating_system AS os
       FROM remote_sessions s
       JOIN devices d ON s.device_id = d.id
       WHERE s.user_id = ?
-      ORDER BY s.started_at DESC
+      ORDER BY s.created_at DESC
       LIMIT 50
-    `);
+    `, [req.user!.id]);
 
-    const sessions = stmt.all(req.user!.id);
     return res.json({ sessions });
   } catch (err: any) {
     console.error('List sessions error:', err);
@@ -28,20 +34,19 @@ sessionsRouter.get('/', requireAuth, (req: AuthenticatedRequest, res: Response) 
   }
 });
 
-// Get session details
-sessionsRouter.get('/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 2. Get session details
+sessionsRouter.get('/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const stmt = db.prepare(`
+    const session = await queryOne(`
       SELECT
         s.*,
         d.device_name,
-        d.os
+        d.operating_system AS os
       FROM remote_sessions s
       JOIN devices d ON s.device_id = d.id
       WHERE s.id = ? AND s.user_id = ?
-    `);
+    `, [req.params.id, req.user!.id]);
 
-    const session = stmt.get(req.params.id, req.user!.id);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -53,31 +58,94 @@ sessionsRouter.get('/:id', requireAuth, (req: AuthenticatedRequest, res: Respons
   }
 });
 
-// Explicitly disconnect a session
-sessionsRouter.post('/:id/disconnect', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 3. POST /api/sessions/:id/approve (Host user approves remote session)
+sessionsRouter.post('/:id/approve', async (req, res) => {
   try {
     const sessionId = req.params.id;
-    const stmt = db.prepare('SELECT * FROM remote_sessions WHERE id = ? AND user_id = ?');
-    const session: any = stmt.get(sessionId, req.user!.id);
+    const session = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessionId]);
 
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
     const now = Date.now();
-    db.prepare(`
+    await execute(`
       UPDATE remote_sessions
-      SET status = 'ended', ended_at = ?
+      SET approval_status = 'approved', session_status = 'active', connected_at = ?
       WHERE id = ?
-    `).run(now, sessionId);
+    `, [now, sessionId]);
 
-    // Notify WebSocket peers
+    approveSessionAndNotify(sessionId);
+
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [session.user_id, session.device_id, 'session_approved', 'Host user approved remote connection', req.ip || '', now]
+    );
+
+    return res.json({ success: true, message: 'Session approved' });
+  } catch (err: any) {
+    console.error('Approve session error:', err);
+    return res.status(500).json({ error: 'Failed to approve session' });
+  }
+});
+
+// 4. POST /api/sessions/:id/reject (Host user rejects remote session)
+sessionsRouter.post('/:id/reject', async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const session = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessionId]);
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const now = Date.now();
+    await execute(`
+      UPDATE remote_sessions
+      SET approval_status = 'rejected', session_status = 'ended', disconnected_at = ?
+      WHERE id = ?
+    `, [now, sessionId]);
+
+    rejectSessionAndNotify(sessionId, 'Host user rejected the remote session request');
+
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [session.user_id, session.device_id, 'session_rejected', 'Host user declined remote connection request', req.ip || '', now]
+    );
+
+    return res.json({ success: true, message: 'Session rejected' });
+  } catch (err: any) {
+    console.error('Reject session error:', err);
+    return res.status(500).json({ error: 'Failed to reject session' });
+  }
+});
+
+// 5. POST /api/sessions/:id/disconnect (Disconnect session)
+sessionsRouter.post('/:id/disconnect', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const sessionId = req.params.id;
+    const session = await queryOne('SELECT * FROM remote_sessions WHERE id = ? AND user_id = ?', [
+      sessionId,
+      req.user!.id
+    ]);
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const now = Date.now();
+    await execute(`
+      UPDATE remote_sessions
+      SET session_status = 'ended', disconnected_at = ?
+      WHERE id = ?
+    `, [now, sessionId]);
+
     endSessionAndNotify(sessionId, 'User requested disconnect');
 
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-      VALUES (?, ?, 'session_disconnected', 'Session manually ended by user', ?, ?)
-    `).run(req.user!.id, session.device_id, req.ip || '', now);
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, session.device_id, 'session_disconnected', 'Session manually ended by user', req.ip || '', now]
+    );
 
     return res.json({ success: true, message: 'Session disconnected' });
   } catch (err: any) {
@@ -86,7 +154,7 @@ sessionsRouter.post('/:id/disconnect', requireAuth, (req: AuthenticatedRequest, 
   }
 });
 
-// Return WebRTC ICE servers configuration (STUN + optional TURN)
+// 6. WebRTC ICE configuration
 sessionsRouter.get('/config/ice-servers', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
   const iceServers: any[] = [
     {
@@ -110,4 +178,3 @@ sessionsRouter.get('/config/ice-servers', requireAuth, (_req: AuthenticatedReque
 
   return res.json({ iceServers });
 });
-

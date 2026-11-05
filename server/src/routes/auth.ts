@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import crypto from 'node:crypto';
-import { db } from '../db.js';
+import { queryOne, execute } from '../db.js';
 import { hashPassword, verifyPassword, generateToken } from '../security.js';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
 
@@ -8,10 +8,11 @@ export const authRouter = Router();
 
 authRouter.post('/register', async (req, res) => {
   try {
-    const { email, password, fullName } = req.body;
+    const { email, password, fullName, name } = req.body;
+    const userName = (fullName || name || '').trim();
 
-    if (!email || !password || !fullName) {
-      return res.status(400).json({ error: 'Email, password, and full name are required' });
+    if (!email || !password || !userName) {
+      return res.status(400).json({ error: 'Name, email, and password are required' });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
@@ -23,9 +24,8 @@ authRouter.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 8 characters long' });
     }
 
-    const checkStmt = db.prepare('SELECT id FROM users WHERE email = ?');
-    const existing = checkStmt.get(trimmedEmail);
-    if (existing) {
+    const existingUser = await queryOne('SELECT id FROM users WHERE email = ?', [trimmedEmail]);
+    if (existingUser) {
       return res.status(409).json({ error: 'An account with this email already exists' });
     }
 
@@ -33,26 +33,25 @@ authRouter.post('/register', async (req, res) => {
     const passwordHash = await hashPassword(password);
     const now = Date.now();
 
-    const insertStmt = db.prepare(`
-      INSERT INTO users (id, email, password_hash, full_name, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-    insertStmt.run(userId, trimmedEmail, passwordHash, fullName.trim(), now, now);
+    await execute(
+      'INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [userId, userName, userName, trimmedEmail, passwordHash, now, now]
+    );
 
-    const logStmt = db.prepare(`
-      INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
-      VALUES (?, 'user_register', 'User registered new account', ?, ?)
-    `);
-    logStmt.run(userId, req.ip || '', now);
+    await execute(
+      'INSERT INTO audit_logs (user_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?)',
+      [userId, 'user_register', 'User registered new account', req.ip || '', now]
+    );
 
-    const token = generateToken({ id: userId, email: trimmedEmail, fullName: fullName.trim() });
+    const token = generateToken({ id: userId, email: trimmedEmail, fullName: userName });
 
     return res.status(201).json({
       token,
       user: {
         id: userId,
         email: trimmedEmail,
-        fullName: fullName.trim()
+        fullName: userName,
+        name: userName
       }
     });
   } catch (err: any) {
@@ -69,8 +68,7 @@ authRouter.post('/login', async (req, res) => {
     }
 
     const trimmedEmail = email.trim().toLowerCase();
-    const stmt = db.prepare('SELECT * FROM users WHERE email = ?');
-    const user: any = stmt.get(trimmedEmail);
+    const user = await queryOne('SELECT * FROM users WHERE email = ?', [trimmedEmail]);
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
@@ -82,20 +80,21 @@ authRouter.post('/login', async (req, res) => {
     }
 
     const now = Date.now();
-    const logStmt = db.prepare(`
-      INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
-      VALUES (?, 'user_login', 'User signed in', ?, ?)
-    `);
-    logStmt.run(user.id, req.ip || '', now);
+    await execute(
+      'INSERT INTO audit_logs (user_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?)',
+      [user.id, 'user_login', 'User signed in', req.ip || '', now]
+    );
 
-    const token = generateToken({ id: user.id, email: user.email, fullName: user.full_name });
+    const displayName = user.name || user.full_name || '';
+    const token = generateToken({ id: user.id, email: user.email, fullName: displayName });
 
     return res.json({
       token,
       user: {
         id: user.id,
         email: user.email,
-        fullName: user.full_name
+        fullName: displayName,
+        name: displayName
       }
     });
   } catch (err: any) {
@@ -104,22 +103,37 @@ authRouter.post('/login', async (req, res) => {
   }
 });
 
-authRouter.get('/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const stmt = db.prepare('SELECT id, email, full_name, created_at FROM users WHERE id = ?');
-  const user = stmt.get(req.user!.id);
-  if (!user) {
-    return res.status(404).json({ error: 'User not found' });
+authRouter.get('/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = await queryOne('SELECT id, name, email, created_at FROM users WHERE id = ?', [req.user!.id]);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    return res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.name,
+        name: user.name,
+        createdAt: user.created_at
+      }
+    });
+  } catch (err: any) {
+    console.error('Get profile error:', err);
+    return res.status(500).json({ error: 'Failed to retrieve user profile' });
   }
-  return res.json({ user });
 });
 
-authRouter.post('/logout', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const logStmt = db.prepare(`
-    INSERT INTO audit_logs (user_id, action, details, ip_address, created_at)
-    VALUES (?, 'user_logout', 'User signed out', ?, ?)
-  `);
-  logStmt.run(req.user!.id, req.ip || '', Date.now());
-  return res.json({ success: true, message: 'Logged out successfully' });
+authRouter.post('/logout', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await execute(
+      'INSERT INTO audit_logs (user_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?)',
+      [req.user!.id, 'user_logout', 'User signed out', req.ip || '', Date.now()]
+    );
+    return res.json({ success: true, message: 'Logged out successfully' });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to logout' });
+  }
 });
 
 authRouter.post('/change-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
@@ -132,8 +146,7 @@ authRouter.post('/change-password', requireAuth, async (req: AuthenticatedReques
       return res.status(400).json({ error: 'New password must be at least 8 characters long' });
     }
 
-    const stmt = db.prepare('SELECT password_hash FROM users WHERE id = ?');
-    const user: any = stmt.get(req.user!.id);
+    const user = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.user!.id]);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
@@ -144,8 +157,7 @@ authRouter.post('/change-password', requireAuth, async (req: AuthenticatedReques
     }
 
     const newHash = await hashPassword(newPassword);
-    const updateStmt = db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?');
-    updateStmt.run(newHash, Date.now(), req.user!.id);
+    await execute('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [newHash, Date.now(), req.user!.id]);
 
     return res.json({ success: true, message: 'Password changed successfully' });
   } catch (err: any) {
@@ -153,4 +165,3 @@ authRouter.post('/change-password', requireAuth, async (req: AuthenticatedReques
     return res.status(500).json({ error: 'Failed to change password' });
   }
 });
-

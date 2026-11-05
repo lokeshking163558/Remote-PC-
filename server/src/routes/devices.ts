@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import crypto from 'node:crypto';
-import { db } from '../db.js';
+import { query, queryOne, execute } from '../db.js';
 import {
   hashPin,
   verifyPin,
@@ -14,72 +14,82 @@ import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
 export const devicesRouter = Router();
 
 // 1. List user's devices
-devicesRouter.get('/', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const stmt = db.prepare(`
+    const devices = await query(`
       SELECT
         d.id,
-        d.device_name,
-        d.os,
-        d.agent_version,
-        d.online_status,
-        d.last_seen,
-        d.local_ip,
-        d.mac_address,
-        d.registered_at,
-        CASE WHEN c.pin_hash IS NOT NULL THEN 1 ELSE 0 END AS has_pin,
-        c.failed_attempts,
-        c.lockout_until,
-        (SELECT json_object('cpuUsage', cpu_usage, 'memoryUsage', memory_usage, 'storageUsage', storage_usage, 'batteryPercent', battery_percent, 'isCharging', is_charging, 'collectedAt', collected_at)
-         FROM device_metrics
-         WHERE device_id = d.id
-         ORDER BY collected_at DESC
-         LIMIT 1) AS latest_metrics
+        d.device_name AS "deviceName",
+        d.operating_system AS "os",
+        d.agent_version AS "agentVersion",
+        d.device_status AS "deviceStatus",
+        d.last_seen AS "lastSeen",
+        d.local_ip AS "localIp",
+        d.mac_address AS "macAddress",
+        d.wake_support AS "wakeSupport",
+        d.created_at AS "registeredAt",
+        CASE WHEN c.pin_hash IS NOT NULL THEN true ELSE false END AS "hasPin",
+        c.failed_attempts AS "failedAttempts",
+        c.lockout_until AS "lockoutUntil"
       FROM devices d
       LEFT JOIN device_credentials c ON d.id = c.device_id
       WHERE d.user_id = ?
-      ORDER BY d.online_status DESC, d.last_seen DESC
-    `);
+      ORDER BY d.device_status ASC, d.last_seen DESC
+    `, [req.user!.id]);
 
-    const rows: any[] = stmt.all(req.user!.id);
-    const devices = rows.map((r) => ({
-      id: r.id,
-      deviceName: r.device_name,
-      os: r.os,
-      agentVersion: r.agent_version,
-      onlineStatus: Boolean(r.online_status),
-      lastSeen: r.last_seen,
-      localIp: r.local_ip,
-      macAddress: r.mac_address,
-      registeredAt: r.registered_at,
-      hasPin: Boolean(r.has_pin),
-      isLocked: r.lockout_until > Date.now(),
-      lockoutUntil: r.lockout_until,
-      latestMetrics: r.latest_metrics ? JSON.parse(r.latest_metrics) : null
-    }));
+    const formattedDevices = await Promise.all(
+      devices.map(async (d: any) => {
+        const latestMetrics = await queryOne(`
+          SELECT cpu_usage AS "cpuUsage", memory_usage AS "memoryUsage", storage_usage AS "storageUsage",
+                 battery_percent AS "batteryPercent", is_charging AS "isCharging", collected_at AS "collectedAt"
+          FROM device_metrics
+          WHERE device_id = ?
+          ORDER BY collected_at DESC
+          LIMIT 1
+        `, [d.id]);
 
-    return res.json({ devices });
+        const isOnline = d.deviceStatus === 'online';
+        const isLocked = Number(d.lockoutUntil) > Date.now();
+
+        return {
+          id: d.id,
+          deviceName: d.deviceName,
+          os: d.os,
+          agentVersion: d.agentVersion,
+          onlineStatus: isOnline,
+          deviceStatus: d.deviceStatus,
+          lastSeen: Number(d.lastSeen),
+          localIp: d.localIp,
+          macAddress: d.macAddress,
+          registeredAt: Number(d.registeredAt),
+          hasPin: Boolean(d.hasPin),
+          isLocked,
+          lockoutUntil: Number(d.lockoutUntil),
+          latestMetrics: latestMetrics || null
+        };
+      })
+    );
+
+    return res.json({ devices: formattedDevices });
   } catch (err: any) {
     console.error('List devices error:', err);
     return res.status(500).json({ error: 'Failed to retrieve devices' });
   }
 });
 
-// 2. Generate a 6-digit pairing code for Windows Agent setup
-devicesRouter.post('/generate-pairing-code', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 2. Generate a 6-digit pairing code
+devicesRouter.post('/generate-pairing-code', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    // Clean up expired pairing codes
-    db.exec(`DELETE FROM pairing_codes WHERE expires_at < ${Date.now()}`);
+    const now = Date.now();
+    await execute('DELETE FROM pairing_codes WHERE expires_at < ?', [now]);
 
     const code = generatePairingCode();
-    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes validity
-    const now = Date.now();
+    const expiresAt = now + 15 * 60 * 1000; // 15 mins
 
-    const insertStmt = db.prepare(`
-      INSERT INTO pairing_codes (code, user_id, expires_at, created_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    insertStmt.run(code, req.user!.id, expiresAt, now);
+    await execute(
+      'INSERT INTO pairing_codes (code, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)',
+      [code, req.user!.id, expiresAt, now]
+    );
 
     return res.json({
       pairingCode: code,
@@ -92,7 +102,7 @@ devicesRouter.post('/generate-pairing-code', requireAuth, (req: AuthenticatedReq
   }
 });
 
-// 3. Pair device using a pairing code (Called by desktop agent during initial setup)
+// 3. Pair device using a pairing code (Agent setup)
 devicesRouter.post('/pair', async (req, res) => {
   try {
     const { pairingCode, deviceName, os, pin, agentVersion, macAddress, localIp } = req.body;
@@ -105,8 +115,10 @@ devicesRouter.post('/pair', async (req, res) => {
       return res.status(400).json({ error: 'PIN must be 6 to 8 digits' });
     }
 
-    const codeStmt = db.prepare('SELECT * FROM pairing_codes WHERE code = ? AND expires_at > ?');
-    const pairRecord: any = codeStmt.get(pairingCode, Date.now());
+    const pairRecord = await queryOne('SELECT * FROM pairing_codes WHERE code = ? AND expires_at > ?', [
+      pairingCode,
+      Date.now()
+    ]);
 
     if (!pairRecord) {
       return res.status(400).json({ error: 'Invalid or expired pairing code. Please generate a new code from the dashboard.' });
@@ -117,11 +129,10 @@ devicesRouter.post('/pair', async (req, res) => {
     const authToken = generateDeviceAuthToken();
     const now = Date.now();
 
-    const insertDevice = db.prepare(`
-      INSERT INTO devices (id, user_id, device_name, os, agent_version, auth_token, online_status, last_seen, local_ip, mac_address, registered_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-    `);
-    insertDevice.run(
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, last_seen, local_ip, mac_address, wake_support, created_at)
+      VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, 1, ?)
+    `, [
       deviceId,
       userId,
       deviceName.trim(),
@@ -132,23 +143,21 @@ devicesRouter.post('/pair', async (req, res) => {
       localIp || null,
       macAddress || null,
       now
-    );
+    ]);
 
     const { hash, salt } = hashPin(pin);
-    const insertCreds = db.prepare(`
-      INSERT INTO device_credentials (device_id, pin_hash, pin_salt, pin_updated_at, failed_attempts, lockout_until)
-      VALUES (?, ?, ?, ?, 0, 0)
-    `);
-    insertCreds.run(deviceId, hash, salt, now);
+    await execute(`
+      INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at)
+      VALUES (?, ?, ?, 0, 0, ?)
+    `, [deviceId, hash, salt, now]);
 
     // Consume pairing code
-    db.prepare('DELETE FROM pairing_codes WHERE code = ?').run(pairingCode);
+    await execute('DELETE FROM pairing_codes WHERE code = ?', [pairingCode]);
 
-    // Audit log
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-      VALUES (?, ?, 'device_paired', ?, ?, ?)
-    `).run(userId, deviceId, `Device paired: ${deviceName.trim()}`, req.ip || '', now);
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, deviceId, 'device_paired', `Device paired: ${deviceName.trim()}`, req.ip || '', now]
+    );
 
     return res.status(201).json({
       success: true,
@@ -163,61 +172,146 @@ devicesRouter.post('/pair', async (req, res) => {
   }
 });
 
-// 4. Get specific device details
-devicesRouter.get('/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 4. POST /api/devices/register (Direct API registration endpoint)
+devicesRouter.post('/register', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const stmt = db.prepare(`
-      SELECT
-        d.*,
-        c.pin_updated_at,
-        c.failed_attempts,
-        c.lockout_until
+    const { deviceName, os, agentVersion, pin, macAddress, localIp } = req.body;
+    if (!deviceName) {
+      return res.status(400).json({ error: 'Device name is required' });
+    }
+
+    const deviceId = crypto.randomUUID();
+    const authToken = generateDeviceAuthToken();
+    const now = Date.now();
+
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, last_seen, local_ip, mac_address, wake_support, created_at)
+      VALUES (?, ?, ?, ?, ?, 'offline', ?, ?, ?, ?, 1, ?)
+    `, [
+      deviceId,
+      req.user!.id,
+      deviceName.trim(),
+      os || 'Windows',
+      agentVersion || '1.0.0',
+      authToken,
+      now,
+      localIp || null,
+      macAddress || null,
+      now
+    ]);
+
+    if (pin && /^\d{6,8}$/.test(pin)) {
+      const { hash, salt } = hashPin(pin);
+      await execute(`
+        INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at)
+        VALUES (?, ?, ?, 0, 0, ?)
+      `, [deviceId, hash, salt, now]);
+    }
+
+    return res.status(201).json({
+      success: true,
+      deviceId,
+      authToken,
+      deviceName: deviceName.trim()
+    });
+  } catch (err: any) {
+    console.error('Register device error:', err);
+    return res.status(500).json({ error: 'Failed to register device' });
+  }
+});
+
+// 5. POST /api/devices/heartbeat (Agent HTTP heartbeat backup)
+devicesRouter.post('/heartbeat', async (req, res) => {
+  try {
+    const { deviceId, authToken, metrics, localIp, macAddress } = req.body;
+    if (!deviceId || !authToken) {
+      return res.status(401).json({ error: 'Missing device credentials' });
+    }
+
+    const device = await queryOne('SELECT * FROM devices WHERE id = ? AND auth_token = ?', [deviceId, authToken]);
+    if (!device) {
+      return res.status(401).json({ error: 'Invalid device credentials' });
+    }
+
+    const now = Date.now();
+    await execute(`
+      UPDATE devices
+      SET device_status = 'online', last_seen = ?, local_ip = COALESCE(?, local_ip), mac_address = COALESCE(?, mac_address)
+      WHERE id = ?
+    `, [now, localIp || null, macAddress || null, deviceId]);
+
+    if (metrics) {
+      await execute(`
+        INSERT INTO device_metrics (device_id, cpu_usage, memory_usage, storage_usage, battery_percent, is_charging, collected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [
+        deviceId,
+        metrics.cpuUsage || 0,
+        metrics.memoryUsage || 0,
+        metrics.storageUsage || 0,
+        metrics.batteryPercent ?? null,
+        metrics.isCharging ? 1 : 0,
+        now
+      ]);
+    }
+
+    return res.json({ success: true, timestamp: now });
+  } catch (err: any) {
+    console.error('Heartbeat error:', err);
+    return res.status(500).json({ error: 'Heartbeat failed' });
+  }
+});
+
+// 6. Get device details
+devicesRouter.get('/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const device = await queryOne(`
+      SELECT d.*, c.updated_at AS pin_updated_at, c.failed_attempts, c.lockout_until
       FROM devices d
       LEFT JOIN device_credentials c ON d.id = c.device_id
       WHERE d.id = ? AND d.user_id = ?
-    `);
+    `, [req.params.id, req.user!.id]);
 
-    const r: any = stmt.get(req.params.id, req.user!.id);
-    if (!r) {
+    if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    // Get latest metrics
-    const metricsStmt = db.prepare(`
+    const metrics = await queryOne(`
       SELECT cpu_usage, memory_usage, storage_usage, battery_percent, is_charging, collected_at
       FROM device_metrics
       WHERE device_id = ?
       ORDER BY collected_at DESC
       LIMIT 1
-    `);
-    const metrics = metricsStmt.get(r.id);
+    `, [device.id]);
 
-    // Get recent sessions
-    const sessionsStmt = db.prepare(`
-      SELECT id, status, connection_type, started_at, ended_at, client_ip
+    const recentSessions = await query(`
+      SELECT id, session_status AS status, approval_status, connection_type, created_at AS started_at, disconnected_at AS ended_at, client_ip
       FROM remote_sessions
       WHERE device_id = ?
-      ORDER BY started_at DESC
+      ORDER BY created_at DESC
       LIMIT 10
-    `);
-    const recentSessions = sessionsStmt.all(r.id);
+    `, [device.id]);
+
+    const isLocked = Number(device.lockout_until) > Date.now();
 
     return res.json({
       device: {
-        id: r.id,
-        deviceName: r.device_name,
-        os: r.os,
-        agentVersion: r.agent_version,
-        onlineStatus: Boolean(r.online_status),
-        lastSeen: r.last_seen,
-        localIp: r.local_ip,
-        macAddress: r.mac_address,
-        registeredAt: r.registered_at,
-        isLocked: r.lockout_until > Date.now(),
-        lockoutUntil: r.lockout_until,
-        failedAttempts: r.failed_attempts,
-        pinConfigured: Boolean(r.pin_updated_at),
-        pinUpdatedAt: r.pin_updated_at,
+        id: device.id,
+        deviceName: device.device_name,
+        os: device.operating_system,
+        agentVersion: device.agent_version,
+        onlineStatus: device.device_status === 'online',
+        deviceStatus: device.device_status,
+        lastSeen: Number(device.last_seen),
+        localIp: device.local_ip,
+        macAddress: device.mac_address,
+        wakeSupport: Boolean(device.wake_support),
+        registeredAt: Number(device.created_at),
+        isLocked,
+        lockoutUntil: Number(device.lockout_until),
+        failedAttempts: device.failed_attempts,
+        pinConfigured: Boolean(device.pin_updated_at),
+        pinUpdatedAt: Number(device.pin_updated_at),
         latestMetrics: metrics || null,
         recentSessions
       }
@@ -228,23 +322,20 @@ devicesRouter.get('/:id', requireAuth, (req: AuthenticatedRequest, res: Response
   }
 });
 
-// 5. Update device name
-devicesRouter.patch('/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 7. Update device name
+devicesRouter.patch('/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { deviceName } = req.body;
     if (!deviceName || !deviceName.trim()) {
       return res.status(400).json({ error: 'Device name cannot be empty' });
     }
 
-    const checkStmt = db.prepare('SELECT id FROM devices WHERE id = ? AND user_id = ?');
-    const exists = checkStmt.get(req.params.id, req.user!.id);
-    if (!exists) {
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND user_id = ?', [req.params.id, req.user!.id]);
+    if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    const updateStmt = db.prepare('UPDATE devices SET device_name = ? WHERE id = ?');
-    updateStmt.run(deviceName.trim(), req.params.id);
-
+    await execute('UPDATE devices SET device_name = ? WHERE id = ?', [deviceName.trim(), req.params.id]);
     return res.json({ success: true, message: 'Device updated successfully' });
   } catch (err: any) {
     console.error('Update device error:', err);
@@ -252,21 +343,19 @@ devicesRouter.patch('/:id', requireAuth, (req: AuthenticatedRequest, res: Respon
   }
 });
 
-// 6. Delete / unregister device
-devicesRouter.delete('/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 8. Delete / Unregister device
+devicesRouter.delete('/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const checkStmt = db.prepare('SELECT id, device_name FROM devices WHERE id = ? AND user_id = ?');
-    const device: any = checkStmt.get(req.params.id, req.user!.id);
+    const device = await queryOne('SELECT id, device_name FROM devices WHERE id = ? AND user_id = ?', [req.params.id, req.user!.id]);
     if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    db.prepare('DELETE FROM devices WHERE id = ?').run(req.params.id);
-
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-      VALUES (?, ?, 'device_removed', ?, ?, ?)
-    `).run(req.user!.id, req.params.id, `Removed device: ${device.device_name}`, req.ip || '', Date.now());
+    await execute('DELETE FROM devices WHERE id = ?', [req.params.id]);
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, req.params.id, 'device_removed', `Removed device: ${device.device_name}`, req.ip || '', Date.now()]
+    );
 
     return res.json({ success: true, message: 'Device removed successfully' });
   } catch (err: any) {
@@ -275,45 +364,45 @@ devicesRouter.delete('/:id', requireAuth, (req: AuthenticatedRequest, res: Respo
   }
 });
 
-// 7. Verify Device PIN with progressive delays & rate-limiting lockout
-devicesRouter.post('/:id/verify-pin', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+// 9. POST /api/devices/:id/verify-pin & POST /api/devices/:id/connect (Initiate remote session with PIN)
+const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { pin } = req.body;
     const deviceId = req.params.id;
 
     if (!pin) {
-      return res.status(400).json({ error: 'PIN is required' });
+      return res.status(400).json({ error: 'Access PIN is required' });
     }
 
-    // Verify device ownership
-    const devStmt = db.prepare('SELECT id, device_name, online_status FROM devices WHERE id = ? AND user_id = ?');
-    const device: any = devStmt.get(deviceId, req.user!.id);
+    const device = await queryOne('SELECT id, device_name, device_status FROM devices WHERE id = ? AND user_id = ?', [
+      deviceId,
+      req.user!.id
+    ]);
+
     if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    if (!device.online_status) {
+    if (device.device_status !== 'online') {
       return res.status(400).json({ error: 'Device is currently offline. Cannot establish a remote session.' });
     }
 
-    // Load credentials
-    const credStmt = db.prepare('SELECT * FROM device_credentials WHERE device_id = ?');
-    const creds: any = credStmt.get(deviceId);
-    if (!creds) {
+    const creds = await queryOne('SELECT * FROM device_credentials WHERE device_id = ?', [deviceId]);
+    if (!creds || !creds.pin_hash) {
       return res.status(400).json({ error: 'No PIN has been configured for this computer' });
     }
 
     const now = Date.now();
+    const lockoutUntil = Number(creds.lockout_until);
 
-    // Check if device is in lockout
-    if (creds.lockout_until && creds.lockout_until > now) {
-      const remainingSeconds = Math.ceil((creds.lockout_until - now) / 1000);
+    if (lockoutUntil > now) {
+      const remainingSeconds = Math.ceil((lockoutUntil - now) / 1000);
       const remainingMinutes = Math.ceil(remainingSeconds / 60);
 
-      db.prepare(`
-        INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-        VALUES (?, ?, 'pin_attempt_blocked', 'Attempt while locked out', ?, ?)
-      `).run(req.user!.id, deviceId, req.ip || '', now);
+      await execute(
+        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [req.user!.id, deviceId, 'pin_attempt_blocked', 'Attempt while locked out', req.ip || '', now]
+      );
 
       return res.status(429).json({
         error: `PIN verification is locked due to too many failed attempts. Try again in ${remainingMinutes} minute(s).`,
@@ -322,35 +411,33 @@ devicesRouter.post('/:id/verify-pin', requireAuth, async (req: AuthenticatedRequ
       });
     }
 
-    // Verify PIN with constant-time scrypt
     const isMatch = verifyPin(pin, creds.pin_hash, creds.pin_salt);
 
     if (!isMatch) {
-      const failedAttempts = creds.failed_attempts + 1;
-      let lockoutUntil = 0;
+      const failedAttempts = (creds.failed_attempts || 0) + 1;
+      let newLockout = 0;
       let delayMs = 1000;
 
       if (failedAttempts >= 5) {
-        lockoutUntil = now + 15 * 60 * 1000; // 15 minutes lockout
+        newLockout = now + 15 * 60 * 1000; // 15 mins
       } else if (failedAttempts >= 3) {
-        delayMs = 3000; // 3 seconds progressive delay
+        delayMs = 3000;
       }
 
-      db.prepare(`
-        UPDATE device_credentials
-        SET failed_attempts = ?, lockout_until = ?
-        WHERE device_id = ?
-      `).run(failedAttempts, lockoutUntil, deviceId);
+      await execute('UPDATE device_credentials SET failed_attempts = ?, lockout_until = ? WHERE device_id = ?', [
+        failedAttempts,
+        newLockout,
+        deviceId
+      ]);
 
-      db.prepare(`
-        INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-        VALUES (?, ?, 'pin_failed', ?, ?, ?)
-      `).run(req.user!.id, deviceId, `Failed attempt #${failedAttempts}`, req.ip || '', now);
+      await execute(
+        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [req.user!.id, deviceId, 'pin_failed', `Failed attempt #${failedAttempts}`, req.ip || '', now]
+      );
 
-      // Sleep to prevent rapid-fire brute-force
       await new Promise((r) => setTimeout(r, delayMs));
 
-      if (lockoutUntil > 0) {
+      if (newLockout > 0) {
         return res.status(429).json({
           error: 'Maximum failed PIN attempts exceeded. Device locked for 15 minutes.',
           locked: true,
@@ -364,26 +451,21 @@ devicesRouter.post('/:id/verify-pin', requireAuth, async (req: AuthenticatedRequ
       });
     }
 
-    // Success! Reset failed attempts
-    db.prepare(`
-      UPDATE device_credentials
-      SET failed_attempts = 0, lockout_until = 0
-      WHERE device_id = ?
-    `).run(deviceId);
+    // PIN verified successfully
+    await execute('UPDATE device_credentials SET failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [deviceId]);
 
-    // Create a new authorized remote session record
     const sessionId = crypto.randomUUID();
     const sessionToken = generateSessionToken(req.user!.id, deviceId, sessionId);
 
-    db.prepare(`
-      INSERT INTO remote_sessions (id, user_id, device_id, session_token, status, connection_type, started_at, client_ip)
-      VALUES (?, ?, ?, ?, 'authorized', 'p2p_direct', ?, ?)
-    `).run(sessionId, req.user!.id, deviceId, sessionToken, now, req.ip || '');
+    await execute(`
+      INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, client_ip, created_at, started_at)
+      VALUES (?, ?, ?, ?, 'authorized', 'authorized', 'pending', 'p2p_direct', ?, ?, ?)
+    `, [sessionId, req.user!.id, deviceId, sessionToken, req.ip || '', now, now]);
 
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-      VALUES (?, ?, 'pin_verified', 'Session authorized', ?, ?)
-    `).run(req.user!.id, deviceId, req.ip || '', now);
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, deviceId, 'pin_verified', 'Session authorized, awaiting host approval', req.ip || '', now]
+    );
 
     return res.json({
       success: true,
@@ -391,15 +473,19 @@ devicesRouter.post('/:id/verify-pin', requireAuth, async (req: AuthenticatedRequ
       sessionToken,
       deviceId,
       deviceName: device.device_name,
+      approvalRequired: true,
       expiresInSeconds: 60
     });
   } catch (err: any) {
     console.error('PIN verification error:', err);
     return res.status(500).json({ error: 'Failed to verify PIN' });
   }
-});
+};
 
-// 8. Change Device PIN
+devicesRouter.post('/:id/verify-pin', requireAuth, handleConnectAndPin);
+devicesRouter.post('/:id/connect', requireAuth, handleConnectAndPin);
+
+// 10. Change Device PIN
 devicesRouter.post('/:id/change-pin', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { currentPin, newPin } = req.body;
@@ -409,15 +495,12 @@ devicesRouter.post('/:id/change-pin', requireAuth, async (req: AuthenticatedRequ
       return res.status(400).json({ error: 'New PIN must be 6 to 8 digits' });
     }
 
-    const devStmt = db.prepare('SELECT id FROM devices WHERE id = ? AND user_id = ?');
-    const device = devStmt.get(deviceId, req.user!.id);
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND user_id = ?', [deviceId, req.user!.id]);
     if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    const credStmt = db.prepare('SELECT * FROM device_credentials WHERE device_id = ?');
-    const creds: any = credStmt.get(deviceId);
-
+    const creds = await queryOne('SELECT * FROM device_credentials WHERE device_id = ?', [deviceId]);
     if (creds && creds.pin_hash) {
       if (!currentPin) {
         return res.status(400).json({ error: 'Current PIN is required to set a new PIN' });
@@ -431,23 +514,23 @@ devicesRouter.post('/:id/change-pin', requireAuth, async (req: AuthenticatedRequ
     const { hash, salt } = hashPin(newPin);
     const now = Date.now();
 
-    db.prepare(`
+    await execute(`
       UPDATE device_credentials
-      SET pin_hash = ?, pin_salt = ?, pin_updated_at = ?, failed_attempts = 0, lockout_until = 0
+      SET pin_hash = ?, pin_salt = ?, updated_at = ?, failed_attempts = 0, lockout_until = 0
       WHERE device_id = ?
-    `).run(hash, salt, now, deviceId);
+    `, [hash, salt, now, deviceId]);
 
-    // Invalidate any ongoing sessions for this device
-    db.prepare(`
+    // Invalidate ongoing sessions
+    await execute(`
       UPDATE remote_sessions
-      SET status = 'ended', ended_at = ?
-      WHERE device_id = ? AND status IN ('authorized', 'active')
-    `).run(now, deviceId);
+      SET session_status = 'ended', disconnected_at = ?
+      WHERE device_id = ? AND session_status IN ('authorized', 'active')
+    `, [now, deviceId]);
 
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-      VALUES (?, ?, 'pin_changed', 'Access PIN updated and previous sessions invalidated', ?, ?)
-    `).run(req.user!.id, deviceId, req.ip || '', now);
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, deviceId, 'pin_changed', 'Access PIN updated and previous sessions invalidated', req.ip || '', now]
+    );
 
     return res.json({ success: true, message: 'Device PIN successfully updated' });
   } catch (err: any) {
@@ -456,17 +539,19 @@ devicesRouter.post('/:id/change-pin', requireAuth, async (req: AuthenticatedRequ
   }
 });
 
-// 9. Wake-on-LAN request
+// 11. Wake-on-LAN
 devicesRouter.post('/:id/wake', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const devStmt = db.prepare('SELECT id, device_name, mac_address, online_status FROM devices WHERE id = ? AND user_id = ?');
-    const device: any = devStmt.get(req.params.id, req.user!.id);
+    const device = await queryOne(
+      'SELECT id, device_name, mac_address, device_status FROM devices WHERE id = ? AND user_id = ?',
+      [req.params.id, req.user!.id]
+    );
 
     if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    if (device.online_status) {
+    if (device.device_status === 'online') {
       return res.json({
         success: true,
         message: `${device.device_name} is already online.`,
@@ -484,28 +569,22 @@ devicesRouter.post('/:id/wake', requireAuth, async (req: AuthenticatedRequest, r
     const sent = await sendWakeOnLan(device.mac_address);
     const now = Date.now();
 
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at)
-      VALUES (?, ?, 'wake_requested', ?, ?, ?)
-    `).run(
-      req.user!.id,
-      device.id,
-      `Wake-on-LAN magic packet sent to ${device.mac_address}`,
-      req.ip || '',
-      now
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, device.id, 'wake_requested', `Wake-on-LAN packet dispatched to ${device.mac_address}`, req.ip || '', now]
     );
 
     return res.json({
       success: sent,
       macAddress: device.mac_address,
       message: sent
-        ? `Magic packet sent to ${device.mac_address}. Note: Wake-on-LAN requires the target PC to have Wake-on-LAN enabled in BIOS/UEFI, connected to power, and typically requires a wired Ethernet or supported Wake-on-WLAN adapter.`
+        ? `Magic packet broadcast sent to ${device.mac_address}. Host BIOS/UEFI and network adapter must have Wake-on-LAN enabled.`
         : 'Failed to send broadcast magic packet.',
       limitations: [
-        'Device must be connected to power (AC adapter plugged in for laptops).',
-        'Wake-on-LAN must be enabled in the BIOS/UEFI power management settings.',
+        'Device must be connected to AC power.',
+        'Wake-on-LAN must be enabled in BIOS/UEFI power management.',
         'Network adapter must support wake packets in Windows Device Manager.',
-        'Wired Ethernet is substantially more reliable than Wi-Fi across power states.'
+        'Wired Ethernet is substantially more reliable than Wi-Fi across deep sleep states.'
       ]
     });
   } catch (err: any) {
@@ -514,28 +593,26 @@ devicesRouter.post('/:id/wake', requireAuth, async (req: AuthenticatedRequest, r
   }
 });
 
-// 10. Get Device historical metrics
-devicesRouter.get('/:id/metrics', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// 12. Get device metrics
+devicesRouter.get('/:id/metrics', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const devStmt = db.prepare('SELECT id FROM devices WHERE id = ? AND user_id = ?');
-    const device = devStmt.get(req.params.id, req.user!.id);
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND user_id = ?', [req.params.id, req.user!.id]);
     if (!device) {
       return res.status(404).json({ error: 'Device not found' });
     }
 
-    const stmt = db.prepare(`
-      SELECT cpu_usage, memory_usage, storage_usage, battery_percent, is_charging, collected_at
+    const metrics = await query(`
+      SELECT cpu_usage AS "cpuUsage", memory_usage AS "memoryUsage", storage_usage AS "storageUsage",
+             battery_percent AS "batteryPercent", is_charging AS "isCharging", collected_at AS "collectedAt"
       FROM device_metrics
       WHERE device_id = ?
       ORDER BY collected_at DESC
       LIMIT 60
-    `);
+    `, [req.params.id]);
 
-    const metrics = stmt.all(req.params.id);
     return res.json({ metrics });
   } catch (err: any) {
     console.error('Get metrics error:', err);
     return res.status(500).json({ error: 'Failed to retrieve metrics' });
   }
 });
-

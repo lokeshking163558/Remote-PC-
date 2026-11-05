@@ -88,7 +88,6 @@ namespace RemoteHub.Agent
                     _activeSessionId = null;
                 }
 
-                // Wait before reconnecting
                 await Task.Delay(3000, ct);
             }
         }
@@ -174,10 +173,36 @@ namespace RemoteHub.Agent
                         string sessionId = root.GetProperty("sessionId").GetString() ?? "";
                         string clientIp = root.TryGetProperty("clientIp", out var ip) ? ip.GetString() ?? "" : "";
 
-                        _activeSessionId = sessionId;
-                        _banner.ShowSession(clientIp);
+                        // Show host user approval dialog on desktop UI thread
+                        var staThread = new Thread(() =>
+                        {
+                            var prompt = new ApprovalPromptForm(clientIp);
+                            prompt.Approved += async (s, e) =>
+                            {
+                                _activeSessionId = sessionId;
+                                _banner.ShowSession(clientIp);
 
-                        // Start desktop screen streaming loop
+                                // Send approval back to server
+                                await SendTextMessageAsync(new { type = "agent:approve-session", sessionId });
+
+                                // Start desktop screen capture stream
+                                _ = Task.Run(() => ScreenStreamLoopAsync(sessionId, _cts?.Token ?? CancellationToken.None));
+                            };
+                            prompt.Rejected += async (s, e) =>
+                            {
+                                await SendTextMessageAsync(new { type = "agent:reject-session", sessionId, reason = "Host user declined connection" });
+                            };
+                            Application.Run(prompt);
+                        });
+                        staThread.SetApartmentState(ApartmentState.STA);
+                        staThread.Start();
+                        break;
+                    }
+
+                    case "server:start-stream":
+                    {
+                        string sessionId = root.GetProperty("sessionId").GetString() ?? "";
+                        _activeSessionId = sessionId;
                         Task.Run(() => ScreenStreamLoopAsync(sessionId, _cts?.Token ?? CancellationToken.None));
                         break;
                     }
@@ -211,7 +236,6 @@ namespace RemoteHub.Agent
                             {
                                 try
                                 {
-                                    // Set clipboard on STA thread
                                     Thread staThread = new Thread(() => Clipboard.SetText(text));
                                     staThread.SetApartmentState(ApartmentState.STA);
                                     staThread.Start();
@@ -236,6 +260,20 @@ namespace RemoteHub.Agent
             }
         }
 
+        private async Task SendTextMessageAsync(object payload)
+        {
+            if (_ws != null && _ws.State == WebSocketState.Open)
+            {
+                try
+                {
+                    string json = JsonSerializer.Serialize(payload);
+                    byte[] bytes = Encoding.UTF8.GetBytes(json);
+                    await _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                }
+                catch {}
+            }
+        }
+
         private async Task ScreenStreamLoopAsync(string sessionId, CancellationToken ct)
         {
             while (!ct.IsCancellationRequested && _activeSessionId == sessionId && _ws != null && _ws.State == WebSocketState.Open)
@@ -245,9 +283,7 @@ namespace RemoteHub.Agent
                     int delayMs = 1000 / Math.Max(10, _fps);
                     byte[] jpegBytes = ScreenCaptureService.CaptureDisplayJpeg(_displayIndex, _quality);
 
-                    // Send as binary WebSocket frame for ultra low latency
                     await _ws.SendAsync(new ArraySegment<byte>(jpegBytes), WebSocketMessageType.Binary, true, ct);
-
                     await Task.Delay(delayMs, ct);
                 }
                 catch (Exception ex)
@@ -280,4 +316,3 @@ namespace RemoteHub.Agent
         }
     }
 }
-

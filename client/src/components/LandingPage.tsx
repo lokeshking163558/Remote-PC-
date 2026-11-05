@@ -11,8 +11,10 @@ import {
   ArrowRight,
   CheckCircle,
   EyeOff,
-  Cpu
+  Cpu,
+  FileText
 } from 'lucide-react';
+import { getAgentDownloadUrl, getAgentTxtDownloadUrl } from '../services/api';
 
 interface LandingPageProps {
   onGetStarted: () => void;
@@ -45,7 +47,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onGetStarted, onLogin,
           No mobile app installation. Zero browser pairing. Protected with permanent device PINs.
         </p>
 
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-4 max-w-md mx-auto mb-16">
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4 max-w-lg mx-auto mb-16">
           <button
             onClick={onGetStarted}
             className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-base transition-all shadow-lg shadow-blue-600/30 hover:scale-[1.02] active:scale-95"
@@ -55,12 +57,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onGetStarted, onLogin,
           </button>
 
           <a
-            href="/api/downloads/windows-agent"
+            href={getAgentDownloadUrl()}
             download="RemoteHubAgent.exe"
             className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-700 text-gray-200 font-semibold text-base transition-all hover:scale-[1.02] active:scale-95"
           >
             <Download className="w-4 h-4 text-blue-400" />
-            Download Windows Agent
+            Download Agent (.exe)
+          </a>
+
+          <a
+            href={getAgentTxtDownloadUrl()}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-gray-400 hover:text-gray-200 flex items-center gap-1 mt-2 sm:mt-0"
+            title="View Agent Checksum & Metadata"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Checksum</span>
           </a>
         </div>
 

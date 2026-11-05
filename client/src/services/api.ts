@@ -28,6 +28,16 @@ export function getWsBaseUrl(): string {
   return `${protocol}//${window.location.host}`;
 }
 
+export function getAgentDownloadUrl(): string {
+  const backend = getBackendUrl();
+  return backend ? `${backend}/api/downloads/windows-agent` : '/api/downloads/windows-agent';
+}
+
+export function getAgentTxtDownloadUrl(): string {
+  const backend = getBackendUrl();
+  return backend ? `${backend}/api/downloads/windows-agent.txt` : '/api/downloads/windows-agent.txt';
+}
+
 export function setCustomBackendUrl(url: string) {
   if (!url || !url.trim()) {
     localStorage.removeItem('remotehub_backend_url');

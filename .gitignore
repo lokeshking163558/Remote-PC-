@@ -5,7 +5,9 @@ package-lock.json
 # Build outputs
 client/dist/
 server/dist/
-server/downloads/
+server/downloads/*
+!server/downloads/RemoteHubAgent.exe
+!server/downloads/windows-agent.txt
 agent-windows/bin/
 agent-windows/obj/
 *.user

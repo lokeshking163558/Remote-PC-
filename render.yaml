@@ -14,3 +14,4 @@ services:
         generateValue: true
       - key: SESSION_HMAC_SECRET
         generateValue: true
+

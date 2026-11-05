@@ -74,14 +74,24 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
 
     ws.onopen = () => {
       setConnected(true);
-      setStatusText('Session active. Live video stream established.');
+      setStatusText('PIN verified. Awaiting computer user approval...');
     };
 
     ws.onmessage = async (event) => {
       if (typeof event.data === 'string') {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'server:metrics') {
+          if (msg.type === 'server:session-connected') {
+            setStatusText('Connection request sent. Waiting for host computer approval...');
+          } else if (msg.type === 'server:session-approved') {
+            setStatusText('Connection approved by host! Starting screen stream...');
+          } else if (msg.type === 'server:session-rejected') {
+            setStatusText(`Request declined: ${msg.reason || 'Host user rejected connection'}`);
+            setTimeout(() => onDisconnect(), 2000);
+          } else if (msg.type === 'server:error') {
+            setStatusText(msg.message || 'Desktop host unreachable');
+            setTimeout(() => onDisconnect(), 2500);
+          } else if (msg.type === 'server:metrics') {
             setHostMetrics(msg.metrics);
           } else if (msg.type === 'server:clipboard') {
             setClipboardText(msg.text);
