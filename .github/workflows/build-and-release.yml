@@ -52,3 +52,4 @@ jobs:
           files: |
             agent-windows/bin/Release/net8.0-windows/RemoteHubAgent.exe
             windows-agent.txt
+

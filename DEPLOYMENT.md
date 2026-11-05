@@ -137,3 +137,4 @@ Verify your production deployment using these standard checks:
    - Click "Connect" and enter device PIN.
    - Host Windows laptop displays the 30-second approval modal.
    - Click "Approve" -> Live desktop stream begins with full touch/mouse and keyboard control.
+
