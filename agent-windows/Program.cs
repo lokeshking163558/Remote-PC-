@@ -2,11 +2,15 @@ using System;
 using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace RemoteHub.Agent
 {
     internal static class Program
     {
+        private const string StartupRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string AppName = "RemoteHubAgent";
+
         private static Mutex? _mutex;
         private static NotifyIcon? _trayIcon;
         private static AgentConfig? _config;
@@ -78,6 +82,14 @@ namespace RemoteHub.Agent
                 _setupForm.BringToFront();
             });
 
+            var startupItem = new ToolStripMenuItem("Start with Windows") { Checked = IsRunOnStartupEnabled() };
+            startupItem.Click += (s, e) =>
+            {
+                bool newState = !startupItem.Checked;
+                SetRunOnStartup(newState);
+                startupItem.Checked = IsRunOnStartupEnabled();
+            };
+
             var emergencyItem = new ToolStripMenuItem("Emergency Disconnect", null, (s, e) =>
             {
                 _banner?.HideSession();
@@ -95,6 +107,7 @@ namespace RemoteHub.Agent
             menu.Items.Add(statusItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(openSetupItem);
+            menu.Items.Add(startupItem);
             menu.Items.Add(emergencyItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
@@ -121,6 +134,40 @@ namespace RemoteHub.Agent
             };
 
             _trayIcon.DoubleClick += (s, e) => openSetupItem.PerformClick();
+        }
+
+        private static bool IsRunOnStartupEnabled()
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, false);
+                return key?.GetValue(AppName) != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void SetRunOnStartup(bool enable)
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
+                if (key != null)
+                {
+                    if (enable)
+                    {
+                        var exePath = Environment.ProcessPath ?? Application.ExecutablePath;
+                        key.SetValue(AppName, $"\"{exePath}\"");
+                    }
+                    else
+                    {
+                        key.DeleteValue(AppName, false);
+                    }
+                }
+            }
+            catch {}
         }
     }
 }

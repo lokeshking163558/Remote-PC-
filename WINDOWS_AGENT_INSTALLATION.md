@@ -42,7 +42,7 @@ Get-FileHash .\RemoteHubAgent.exe -Algorithm SHA256
 Compare the resulting hash against the reference hash published in `windows-agent.txt`:
 ```text
 Algorithm: SHA256
-Hash: BCEABBB364ACFE9B68C4B8ED9A46348E16569D264E3028CAF1051C9B742A8E81
+Hash: DF1866C25FF30D01EF5717CCB93F3DA2179EFF6D36C46852656D11987148A83E
 ```
 
 If the hashes match, the binary is authentic and untampered.

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Download, Copy, Check, Terminal, Laptop, ShieldCheck, RefreshCw, AlertCircle, FileText } from 'lucide-react';
-import { api, getAgentDownloadUrl, getAgentTxtDownloadUrl } from '../services/api';
+import { api, getAgentDownloadUrl, getAgentTxtDownloadUrl, DIRECT_GITHUB_AGENT_DOWNLOAD_URL } from '../services/api';
 
 interface AddDeviceModalProps {
   onClose: () => void;
@@ -140,6 +140,18 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onDevic
                 >
                   <Download className="w-4 h-4" />
                   Download RemoteHubAgent.exe
+                </a>
+
+                <a
+                  href={DIRECT_GITHUB_AGENT_DOWNLOAD_URL}
+                  download="RemoteHubAgent.exe"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium text-xs transition-colors"
+                  title="Direct GitHub CDN Mirror"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  GitHub Direct Mirror
                 </a>
 
                 <a

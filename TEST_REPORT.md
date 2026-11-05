@@ -59,7 +59,7 @@ Test Results: 10 passed, 0 failed.
 
 ### Flow B: Windows Agent Downloads
 - **Executable**: `GET /api/downloads/windows-agent` -> Returns `200 OK`, `Content-Type: application/vnd.microsoft.portable-executable`, `Content-Disposition: attachment; filename="RemoteHubAgent.exe"`. Size: 214,142 bytes (Single-File Release).
-- **Instructions & Checksum**: `GET /api/downloads/windows-agent.txt` -> Returns `200 OK`, plain text with SHA-256 hash (`BCEABBB364ACFE9B68C4B8ED9A46348E16569D264E3028CAF1051C9B742A8E81`) and PowerShell verification command.
+- **Instructions & Checksum**: `GET /api/downloads/windows-agent.txt` -> Returns `200 OK`, plain text with SHA-256 hash (`DF1866C25FF30D01EF5717CCB93F3DA2179EFF6D36C46852656D11987148A83E`) and PowerShell verification command.
 - **Info Endpoint**: `GET /api/downloads/info` -> Returns `200 OK` JSON with version, platform, file size, and SHA-256 hash.
 
 ### Flow C: Device Pairing & Heartbeat

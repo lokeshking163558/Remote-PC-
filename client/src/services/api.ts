@@ -28,14 +28,17 @@ export function getWsBaseUrl(): string {
   return `${protocol}//${window.location.host}`;
 }
 
+export const DIRECT_GITHUB_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/server/downloads/RemoteHubAgent.exe';
+export const DIRECT_GITHUB_AGENT_TXT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/windows-agent.txt';
+
 export function getAgentDownloadUrl(): string {
   const backend = getBackendUrl();
-  return backend ? `${backend}/api/downloads/windows-agent` : '/api/downloads/windows-agent';
+  return backend ? `${backend}/api/downloads/windows-agent` : DIRECT_GITHUB_AGENT_DOWNLOAD_URL;
 }
 
 export function getAgentTxtDownloadUrl(): string {
   const backend = getBackendUrl();
-  return backend ? `${backend}/api/downloads/windows-agent.txt` : '/api/downloads/windows-agent.txt';
+  return backend ? `${backend}/api/downloads/windows-agent.txt` : DIRECT_GITHUB_AGENT_TXT_DOWNLOAD_URL;
 }
 
 export function setCustomBackendUrl(url: string) {
