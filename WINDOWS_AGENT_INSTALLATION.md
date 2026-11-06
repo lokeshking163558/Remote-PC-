@@ -22,16 +22,12 @@ You can obtain `RemoteHubAgent.exe` through any of the following methods:
 3. Click the **"Download RemoteHub Agent (.exe)"** button.
 
 ### Method B: Direct URL Download
-- Production Server Executable: `https://remote-pc-server.vercel.app/api/downloads/windows-agent`
-- Production Server Metadata: `https://remote-pc-server.vercel.app/api/downloads/windows-agent.txt`
+- Executable: `https://<YOUR-SERVER-DOMAIN>/api/downloads/windows-agent`
+- Verification Info: `https://<YOUR-SERVER-DOMAIN>/api/downloads/windows-agent.txt`
 
-### Method C: GitHub Raw File Mirror
-- Direct Raw Executable: `https://github.com/lokeshking163558/Remote-PC-/raw/main/server/downloads/RemoteHubAgent.exe`
-- Direct Raw Metadata: `https://github.com/lokeshking163558/Remote-PC-/raw/main/windows-agent.txt`
-
-### Method D: GitHub Releases
-Download pre-compiled binaries from the repository's GitHub Releases page:
-- `https://github.com/lokeshking163558/Remote-PC-/releases`
+### Method C: GitHub Releases
+Download the latest pre-compiled binary from the repository's GitHub Releases page:
+`https://github.com/lokeshking163558/Remote-PC-/releases`
 
 ---
 
@@ -46,7 +42,7 @@ Get-FileHash .\RemoteHubAgent.exe -Algorithm SHA256
 Compare the resulting hash against the reference hash published in `windows-agent.txt`:
 ```text
 Algorithm: SHA256
-Hash: 5E04107E7743ABC32B50434B32E6B6C398E2DD59B2650BDB1EDB5A8899EC5B7D
+Hash: 798232DF3576AB9C21885E006E495D9F734DE9725EBFDC3C63AD00FC93C4DB9D
 ```
 
 If the hashes match, the binary is authentic and untampered.

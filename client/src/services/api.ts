@@ -30,6 +30,8 @@ export function getWsBaseUrl(): string {
 
 export const DIRECT_GITHUB_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/server/downloads/RemoteHubAgent.exe';
 export const DIRECT_GITHUB_AGENT_TXT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/windows-agent.txt';
+export const GITHUB_RELEASES_PAGE_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases';
+export const GITHUB_TAG_RELEASE_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.2.0/RemoteHubAgent.exe';
 
 export function getAgentDownloadUrl(): string {
   const backend = getBackendUrl();
@@ -205,5 +207,34 @@ export const api = {
       headers: { ...getAuthHeader() }
     });
     return handleResponse<{ iceServers: any[] }>(res);
+  },
+
+  async sendSessionSignal(sessionId: string, sender: 'client' | 'agent', signal: any) {
+    const res = await fetch(getApiEndpoint(`/sessions/${sessionId}/signal`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ sender, signal })
+    });
+    return handleResponse<{ success: boolean }>(res);
+  },
+
+  async pollSessionSignals(sessionId: string, receiver: 'client' | 'agent', since: number = 0, timeout = 2500) {
+    const res = await fetch(getApiEndpoint(`/sessions/${sessionId}/signal?receiver=${receiver}&since=${since}&timeout=${timeout}`), {
+      headers: { ...getAuthHeader() }
+    });
+    return handleResponse<{ success: boolean; signals: any[]; timestamp: number }>(res);
+  },
+
+  async sendSessionInput(sessionId: string, input: any) {
+    const res = await fetch(getApiEndpoint(`/sessions/${sessionId}/input`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify({ input })
+    });
+    return handleResponse<{ success: boolean }>(res);
+  },
+
+  getSessionFrameUrl(sessionId: string) {
+    return getApiEndpoint(`/sessions/${sessionId}/frame?t=${Date.now()}`);
   }
 };

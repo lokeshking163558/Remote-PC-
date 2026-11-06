@@ -390,6 +390,12 @@ async function handleClientConnection(ws: WebSocket, queryParams: any) {
 }
 
 export function approveSessionAndNotify(sessionId: string) {
+  // Queue signaling message for HTTP polling clients
+  queueSessionSignal(sessionId, 'agent', {
+    type: 'server:session-approved',
+    sessionId
+  });
+
   const session = activeSessions.get(sessionId);
   if (session) {
     if (session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
@@ -408,6 +414,12 @@ export function approveSessionAndNotify(sessionId: string) {
 }
 
 export function rejectSessionAndNotify(sessionId: string, reason: string) {
+  queueSessionSignal(sessionId, 'agent', {
+    type: 'server:session-rejected',
+    sessionId,
+    reason
+  });
+
   const session = activeSessions.get(sessionId);
   if (session) {
     if (session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
@@ -423,6 +435,12 @@ export function rejectSessionAndNotify(sessionId: string, reason: string) {
 }
 
 export async function endSessionAndNotify(sessionId: string, reason: string) {
+  queueSessionSignal(sessionId, 'agent', {
+    type: 'server:session-ended',
+    sessionId,
+    reason
+  });
+
   const session = activeSessions.get(sessionId);
   if (!session) return;
 
@@ -450,4 +468,141 @@ export async function endSessionAndNotify(sessionId: string, reason: string) {
   }
 
   activeSessions.delete(sessionId);
+}
+
+// -------------------------------------------------------------
+// Universal Dual-Transport Signaling (WebSockets + HTTP Fallback)
+// -------------------------------------------------------------
+export interface QueuedSignal {
+  id: string;
+  sender: 'client' | 'agent';
+  timestamp: number;
+  data: any;
+}
+
+const sessionSignalQueues = new Map<string, QueuedSignal[]>();
+const devicePendingRequests = new Map<string, any>();
+const latestSessionFrames = new Map<string, { buffer: Buffer; timestamp: number }>();
+const signalWaiters = new Map<string, Array<{ receiver: string; resolve: (signals: QueuedSignal[]) => void }>>();
+
+export function queueSessionSignal(sessionId: string, sender: 'client' | 'agent', data: any) {
+  if (!sessionSignalQueues.has(sessionId)) {
+    sessionSignalQueues.set(sessionId, []);
+  }
+  const queue = sessionSignalQueues.get(sessionId)!;
+  const signalItem: QueuedSignal = {
+    id: crypto.randomUUID(),
+    sender,
+    timestamp: Date.now(),
+    data
+  };
+  queue.push(signalItem);
+
+  if (queue.length > 200) {
+    queue.splice(0, queue.length - 200);
+  }
+
+  // Wake up any long-polling listeners
+  const waiters = signalWaiters.get(sessionId);
+  if (waiters) {
+    const remaining: typeof waiters = [];
+    for (const waiter of waiters) {
+      if (waiter.receiver !== sender) {
+        waiter.resolve([signalItem]);
+      } else {
+        remaining.push(waiter);
+      }
+    }
+    signalWaiters.set(sessionId, remaining);
+  }
+
+  // Also deliver over active WebSocket if connected
+  const session = activeSessions.get(sessionId);
+  if (session) {
+    if (sender === 'client' && session.agentWs && session.agentWs.readyState === WebSocket.OPEN) {
+      session.agentWs.send(JSON.stringify({
+        type: 'server:signal',
+        sessionId,
+        signal: data
+      }));
+    } else if (sender === 'agent' && session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
+      session.clientWs.send(JSON.stringify({
+        type: 'server:signal',
+        sessionId,
+        signal: data
+      }));
+    }
+  }
+}
+
+export function pollSessionSignals(sessionId: string, receiver: 'client' | 'agent', since: number, timeoutMs = 3500): Promise<QueuedSignal[]> {
+  const queue = sessionSignalQueues.get(sessionId) || [];
+  const targetSender = receiver === 'client' ? 'agent' : 'client';
+  const newSignals = queue.filter(s => s.sender === targetSender && s.timestamp > since);
+
+  if (newSignals.length > 0 || timeoutMs <= 0) {
+    return Promise.resolve(newSignals);
+  }
+
+  return new Promise<QueuedSignal[]>((resolve) => {
+    if (!signalWaiters.has(sessionId)) {
+      signalWaiters.set(sessionId, []);
+    }
+    const waiterEntry = { receiver, resolve };
+    signalWaiters.get(sessionId)!.push(waiterEntry);
+
+    setTimeout(() => {
+      const list = signalWaiters.get(sessionId);
+      if (list) {
+        const idx = list.indexOf(waiterEntry);
+        if (idx !== -1) list.splice(idx, 1);
+      }
+      resolve([]);
+    }, timeoutMs);
+  });
+}
+
+export function setDevicePendingRequest(deviceId: string, request: any) {
+  devicePendingRequests.set(deviceId, request);
+
+  // Deliver over active WebSocket if open
+  const agentWs = connectedAgents.get(deviceId);
+  if (agentWs && agentWs.readyState === WebSocket.OPEN) {
+    agentWs.send(JSON.stringify({
+      type: 'server:session-request',
+      sessionId: request.sessionId,
+      userId: request.userId,
+      clientIp: request.clientIp
+    }));
+  }
+}
+
+export function getDevicePendingRequest(deviceId: string) {
+  return devicePendingRequests.get(deviceId) || null;
+}
+
+export function clearDevicePendingRequest(deviceId: string, sessionId?: string) {
+  const existing = devicePendingRequests.get(deviceId);
+  if (!sessionId || (existing && existing.sessionId === sessionId)) {
+    devicePendingRequests.delete(deviceId);
+  }
+}
+
+export function storeSessionFrame(sessionId: string, buffer: Buffer) {
+  latestSessionFrames.set(sessionId, { buffer, timestamp: Date.now() });
+
+  // Also deliver to client WebSocket if open
+  const session = activeSessions.get(sessionId);
+  if (session && session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
+    session.clientWs.send(buffer, { binary: true });
+  }
+}
+
+export function getSessionFrame(sessionId: string): Buffer | null {
+  const item = latestSessionFrames.get(sessionId);
+  if (!item) return null;
+  if (Date.now() - item.timestamp < 6000) {
+    return item.buffer;
+  }
+  return null;
 }

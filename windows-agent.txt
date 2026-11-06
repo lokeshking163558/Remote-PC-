@@ -1,16 +1,19 @@
 Product: RemoteHub Desktop Agent
-Version: 1.0.0
+Version: 1.2.0
 Target Platform: Windows 10 / Windows 11 (x64)
 Framework: Microsoft .NET 8.0 Windows Desktop
 Executable: RemoteHubAgent.exe
-SHA-256 Checksum: 5E04107E7743ABC32B50434B32E6B6C398E2DD59B2650BDB1EDB5A8899EC5B7D
+SHA-256 Checksum: 798232DF3576AB9C21885E006E495D9F734DE9725EBFDC3C63AD00FC93C4DB9D
 
 Features:
 - Background system tray execution with persistent status indicators
 - 1-Click pairing with 6-digit cryptographic verification code
 - Permanent 6-8 digit access PIN security with Argon2id / Scrypt protection
-- Real desktop screen capture supporting multi-monitors
-- Native Win32 SendInput hardware mouse & keyboard simulation
+- Real-time WebRTC DataChannel streaming engine with STUN/TURN NAT traversal
+- Universal Dual-Transport Signaling (WebSockets + HTTP Fallback for Serverless/Vercel)
+- Real desktop screen capture with live mouse cursor overlay and multi-monitor bounds
+- Native Win32 SendInput hardware mouse & keyboard simulation with zero lag
 - Live hardware telemetry (CPU, RAM, Storage, Battery & Network)
 - Mandatory host user connection approval prompt with 30s auto-reject
 - Local floating session indicator with 1-click emergency disconnect
+- Windows Native Installer with Start Menu search index & Installed Apps registration

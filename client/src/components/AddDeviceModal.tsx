@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Download, Copy, Check, Terminal, Laptop, ShieldCheck, RefreshCw, AlertCircle, FileText } from 'lucide-react';
-import { api, getAgentDownloadUrl, getAgentTxtDownloadUrl, DIRECT_GITHUB_AGENT_DOWNLOAD_URL } from '../services/api';
+import { api, getAgentDownloadUrl, getAgentTxtDownloadUrl, DIRECT_GITHUB_AGENT_DOWNLOAD_URL, GITHUB_RELEASES_PAGE_URL } from '../services/api';
 
 interface AddDeviceModalProps {
   onClose: () => void;
@@ -132,7 +132,7 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onDevic
               <p className="text-xs text-gray-300 mb-3">
                 Download the lightweight Windows desktop agent. It runs natively in your Windows system tray.
               </p>
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <a
                   href={getAgentDownloadUrl()}
                   download="RemoteHubAgent.exe"
@@ -148,10 +148,21 @@ export const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onDevic
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium text-xs transition-colors"
-                  title="Direct GitHub CDN Mirror"
+                  title="Direct GitHub CDN Binary (Always Available)"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  GitHub Direct Mirror
+                  GitHub Raw Mirror
+                </a>
+
+                <a
+                  href={GITHUB_RELEASES_PAGE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 font-medium text-xs transition-colors"
+                  title="GitHub Releases"
+                >
+                  <Laptop className="w-3.5 h-3.5" />
+                  All Releases
                 </a>
 
                 <a

@@ -1,7 +1,15 @@
 import { Router, Response } from 'express';
 import { query, queryOne, execute } from '../db.js';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
-import { endSessionAndNotify, approveSessionAndNotify, rejectSessionAndNotify } from '../websocket.js';
+import {
+  endSessionAndNotify,
+  approveSessionAndNotify,
+  rejectSessionAndNotify,
+  queueSessionSignal,
+  pollSessionSignals,
+  storeSessionFrame,
+  getSessionFrame
+} from '../websocket.js';
 
 export const sessionsRouter = Router();
 
@@ -165,6 +173,22 @@ sessionsRouter.get('/config/ice-servers', requireAuth, (_req: AuthenticatedReque
         'stun:stun3.l.google.com:19302',
         'stun:stun4.l.google.com:19302'
       ]
+    },
+    // Public fallback TURN servers (OpenRelay) for NAT traversal across different internet networks
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
     }
   ];
 
@@ -177,4 +201,112 @@ sessionsRouter.get('/config/ice-servers', requireAuth, (_req: AuthenticatedReque
   }
 
   return res.json({ iceServers });
+});
+
+// 7. POST /api/sessions/:id/signal (Send WebRTC SDP Offer/Answer, ICE Candidate, or Control Signal)
+sessionsRouter.post('/:id/signal', async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const { sender, signal } = req.body;
+
+    if (!sender || !signal) {
+      return res.status(400).json({ error: 'Sender and signal payload are required' });
+    }
+
+    queueSessionSignal(sessionId, sender, signal);
+    return res.json({ success: true, timestamp: Date.now() });
+  } catch (err: any) {
+    console.error('Signal dispatch error:', err);
+    return res.status(500).json({ error: 'Failed to dispatch signal' });
+  }
+});
+
+// 8. GET /api/sessions/:id/signal (Poll WebRTC Signals - Supports Long Polling)
+sessionsRouter.get('/:id/signal', async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const receiver = (req.query.receiver as 'client' | 'agent') || 'client';
+    const since = Number(req.query.since || 0);
+    const timeout = Math.min(5000, Math.max(0, Number(req.query.timeout || 3500)));
+
+    const signals = await pollSessionSignals(sessionId, receiver, since, timeout);
+    return res.json({
+      success: true,
+      sessionId,
+      timestamp: Date.now(),
+      signals
+    });
+  } catch (err: any) {
+    console.error('Signal poll error:', err);
+    return res.status(500).json({ error: 'Failed to poll signals' });
+  }
+});
+
+// 9. POST /api/sessions/:id/input (Input relay for mouse and keyboard)
+sessionsRouter.post('/:id/input', async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const { input } = req.body;
+
+    if (!input) {
+      return res.status(400).json({ error: 'Input event is required' });
+    }
+
+    queueSessionSignal(sessionId, 'client', {
+      type: 'input',
+      input
+    });
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('Input dispatch error:', err);
+    return res.status(500).json({ error: 'Failed to dispatch input' });
+  }
+});
+
+// 10. POST /api/sessions/:id/frame (Frame relay fallback from Agent)
+sessionsRouter.post('/:id/frame', (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    let buffer: Buffer | null = null;
+
+    if (Buffer.isBuffer(req.body)) {
+      buffer = req.body;
+    } else if (req.body && req.body.frame) {
+      buffer = Buffer.from(req.body.frame, 'base64');
+    }
+
+    if (buffer && buffer.length > 0) {
+      storeSessionFrame(sessionId, buffer);
+      return res.json({ success: true });
+    }
+
+    return res.status(400).json({ error: 'Empty frame buffer' });
+  } catch (err: any) {
+    console.error('Store frame error:', err);
+    return res.status(500).json({ error: 'Failed to store frame' });
+  }
+});
+
+// 11. GET /api/sessions/:id/frame (Fetch latest frame fallback for Browser)
+sessionsRouter.get('/:id/frame', (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const frame = getSessionFrame(sessionId);
+
+    if (!frame) {
+      return res.status(204).end();
+    }
+
+    res.set({
+      'Content-Type': 'image/jpeg',
+      'Content-Length': frame.length.toString(),
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
+    });
+
+    return res.send(frame);
+  } catch (err: any) {
+    console.error('Get frame error:', err);
+    return res.status(500).json({ error: 'Failed to retrieve frame' });
+  }
 });

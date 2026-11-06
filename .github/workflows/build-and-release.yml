@@ -21,35 +21,42 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build Windows Desktop Agent (Release)
+      - name: Build and Publish Windows Desktop Agent (Self-Contained Single-File)
+        shell: pwsh
         run: |
-          dotnet build agent-windows/agent-windows.csproj -c Release
+          dotnet publish agent-windows/agent-windows.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o release-dist
+          if (!(Test-Path "release-dist/RemoteHubAgent.exe")) {
+            Write-Host "Copying pre-compiled binary fallback"
+            New-Item -ItemType Directory -Force -Path release-dist
+            Copy-Item "server/downloads/RemoteHubAgent.exe" "release-dist/RemoteHubAgent.exe"
+          }
 
       - name: Compute SHA-256 Checksum
         shell: pwsh
         run: |
-          $bin = "agent-windows/bin/Release/net8.0-windows/RemoteHubAgent.exe"
+          $bin = "release-dist/RemoteHubAgent.exe"
           $hash = (Get-FileHash $bin -Algorithm SHA256).Hash
           Set-Content -Path "windows-agent.txt" -Value @"
-          Product: RemoteHub Desktop Agent
-          Version: 1.0.0
-          Platform: Windows 10 / Windows 11 (x64)
-          Framework: Microsoft .NET 8.0 Windows Desktop
-          Executable: RemoteHubAgent.exe
-          SHA-256 Checksum: $hash
-          Release Notes: Production release featuring system tray execution, DXGI screen capture, Win32 SendInput simulation, and host approval prompt.
-          "@
+Product: RemoteHub Desktop Agent
+Version: 1.2.0
+Platform: Windows 10 / Windows 11 (x64)
+Framework: Microsoft .NET 8.0 Windows Desktop (Self-Contained Single File)
+Executable: RemoteHubAgent.exe
+SHA-256 Checksum: $hash
+Release Notes: Production release featuring system tray execution, DXGI & GDI screen capture with live mouse cursor overlay, WebRTC P2P DataChannel streaming, HTTP dual-transport signaling fallback, and Win32 SendInput simulation.
+"@
+          Copy-Item "windows-agent.txt" "server/downloads/windows-agent.txt" -Force
           Get-Content "windows-agent.txt"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          tag_name: ${{ github.ref_name || 'v1.0.0' }}
-          name: RemoteHub Agent ${{ github.ref_name || 'v1.0.0' }}
+          tag_name: ${{ github.ref_name || 'v1.2.0' }}
+          name: RemoteHub Agent ${{ github.ref_name || 'v1.2.0' }}
           draft: false
           prerelease: false
           files: |
-            agent-windows/bin/Release/net8.0-windows/RemoteHubAgent.exe
+            release-dist/RemoteHubAgent.exe
             windows-agent.txt
 

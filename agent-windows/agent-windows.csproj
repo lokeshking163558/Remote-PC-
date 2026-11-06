@@ -13,4 +13,8 @@
     <Description>RemoteHub Desktop Agent for Windows</Description>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="SIPSorcery" Version="10.0.17" />
+  </ItemGroup>
+
 </Project>

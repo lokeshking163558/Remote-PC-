@@ -26,14 +26,17 @@ namespace RemoteHub.Agent
         private readonly AgentConfig _config;
         private ClientWebSocket? _ws;
         private CancellationTokenSource? _cts;
+        private CancellationTokenSource? _sessionCts;
+        private WebRtcStreamingService? _webRtc;
         private bool _isRunning;
         private string? _activeSessionId;
         private int _displayIndex = 0;
         private int _quality = 65;
-        private int _fps = 25;
+        private int _fps = 30;
+        private long _lastSignalTimestamp = 0;
         private readonly FloatingSessionBanner _banner;
         private readonly ConcurrentQueue<string> _logs = new();
-        private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(8) };
+        private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
         public AgentConnectionState State { get; private set; } = AgentConnectionState.Disconnected;
         public DateTime? LastSuccessfulHeartbeat { get; private set; }
@@ -82,22 +85,27 @@ namespace RemoteHub.Agent
 
             AddLog($"Starting background agent network services (Server: {_config.ServerUrl})...");
 
-            // 1. Start persistent WebSocket signaling loop
+            // 1. WebSocket signaling loop (if server supports WebSockets)
             Task.Run(() => ConnectionLoopAsync(_cts.Token));
 
-            // 2. Start dedicated HTTP heartbeat loop (fires every 15s regardless of socket state)
+            // 2. Dedicated HTTP heartbeat loop (fires every 15s regardless of socket state)
             Task.Run(() => HttpHeartbeatLoopAsync(_cts.Token));
+
+            // 3. HTTP Agent Polling loop (guarantees session requests arrive even when WebSockets are unavailable e.g. Vercel)
+            Task.Run(() => HttpAgentPollingLoopAsync(_cts.Token));
         }
 
         public void Stop()
         {
             _isRunning = false;
             _cts?.Cancel();
+            _sessionCts?.Cancel();
             try
             {
                 _ws?.Dispose();
             }
             catch {}
+            _webRtc?.Dispose();
             _banner.HideSession();
             SetState(AgentConnectionState.Disconnected, "Agent stopped by user");
         }
@@ -164,6 +172,15 @@ namespace RemoteHub.Agent
                     {
                         SetState(AgentConnectionState.Online, "HTTP Heartbeat verified");
                     }
+
+                    // Check if server returned a pending session request in heartbeat response
+                    string respBody = await res.Content.ReadAsStringAsync(ct);
+                    using var doc = JsonDocument.Parse(respBody);
+                    if (doc.RootElement.TryGetProperty("pendingSession", out var pending) && pending.ValueKind == JsonValueKind.Object)
+                    {
+                        HandlePendingSessionRequest(pending);
+                    }
+
                     return true;
                 }
                 else
@@ -176,6 +193,34 @@ namespace RemoteHub.Agent
             {
                 AddLog($"HTTP Heartbeat network error: {ex.Message}");
                 return false;
+            }
+        }
+
+        private async Task HttpAgentPollingLoopAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested && _isRunning)
+            {
+                if (_config.IsConfigured && _activeSessionId == null)
+                {
+                    try
+                    {
+                        string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}/agent-poll?token={_config.AuthToken}";
+                        var res = await _httpClient.GetAsync(url, ct);
+
+                        if (res.IsSuccessStatusCode)
+                        {
+                            string body = await res.Content.ReadAsStringAsync(ct);
+                            using var doc = JsonDocument.Parse(body);
+                            if (doc.RootElement.TryGetProperty("pendingSession", out var pending) && pending.ValueKind == JsonValueKind.Object)
+                            {
+                                HandlePendingSessionRequest(pending);
+                            }
+                        }
+                    }
+                    catch {}
+                }
+
+                await Task.Delay(1500, ct).ContinueWith(_ => {}, CancellationToken.None);
             }
         }
 
@@ -194,26 +239,20 @@ namespace RemoteHub.Agent
 
                 try
                 {
-                    SetState(AgentConnectionState.Connecting, "Connecting to WebSocket gateway");
                     _ws = new ClientWebSocket();
                     string baseUri = _config.ServerUrl.Replace("http://", "ws://").Replace("https://", "wss://");
                     Uri serverUri = new Uri($"{baseUri.TrimEnd('/')}/ws/agent?deviceId={_config.DeviceId}&token={_config.AuthToken}");
 
-                    AddLog($"Connecting to WS: {serverUri.Host}...");
+                    AddLog($"Attempting WebSocket signaling: {serverUri.Host}...");
                     await _ws.ConnectAsync(serverUri, ct);
 
                     SetState(AgentConnectionState.Online, "WebSocket signaling established");
-                    retryDelayMs = 2000; // Reset backoff delay on successful connection
+                    retryDelayMs = 2000;
 
-                    // Send fresh heartbeat immediately upon connect
                     _ = SendHttpHeartbeatAsync(ct);
 
-                    // Start background WS heartbeat ping
                     var wsHeartbeatTask = Task.Run(() => WsHeartbeatLoopAsync(ct), ct);
-
-                    // Process incoming server messages
                     await ReceiveLoopAsync(ct);
-
                     await wsHeartbeatTask;
                 }
                 catch (OperationCanceledException)
@@ -222,17 +261,18 @@ namespace RemoteHub.Agent
                 }
                 catch (Exception ex)
                 {
-                    AddLog($"WebSocket disconnected: {ex.Message}");
-                    SetState(AgentConnectionState.Reconnecting, $"Retrying in {retryDelayMs / 1000}s...");
+                    // If WebSocket fails (e.g. 404 on Vercel Serverless), fall back cleanly to HTTP signaling without continuous failure loops
+                    AddLog($"WebSocket gateway unavailable ({ex.Message}). Operating in HTTP Signaling & WebRTC P2P mode.");
+                    SetState(AgentConnectionState.Online, "HTTP Signaling & WebRTC P2P Active");
                 }
                 finally
                 {
-                    _banner.HideSession();
-                    _activeSessionId = null;
+                    try { _ws?.Dispose(); } catch {}
+                    _ws = null;
                 }
 
-                await Task.Delay(retryDelayMs, ct).ContinueWith(_ => {}, CancellationToken.None);
-                retryDelayMs = Math.Min(30000, retryDelayMs * 2); // Exponential backoff max 30s
+                // If on Vercel or server without WebSockets, wait longer before attempting reconnect
+                await Task.Delay(Math.Max(30000, retryDelayMs), ct).ContinueWith(_ => {}, CancellationToken.None);
             }
         }
 
@@ -312,55 +352,22 @@ namespace RemoteHub.Agent
                 switch (type)
                 {
                     case "server:session-request":
-                    {
-                        string sessionId = root.GetProperty("sessionId").GetString() ?? "";
-                        string clientIp = root.TryGetProperty("clientIp", out var ip) ? ip.GetString() ?? "" : "";
-
-                        // Check privacy setting
-                        if (_config.PauseRemoteAccess)
-                        {
-                            AddLog($"Declined connection from {clientIp} (Remote Access is paused by host user)");
-                            _ = SendTextMessageAsync(new
-                            {
-                                type = "agent:reject-session",
-                                sessionId,
-                                reason = "Host computer has temporarily paused remote access."
-                            });
-                            break;
-                        }
-
-                        AddLog($"Remote session connection requested by {clientIp}. Prompting user...");
-
-                        // Show host user approval dialog on desktop UI thread
-                        var staThread = new Thread(() =>
-                        {
-                            var prompt = new ApprovalPromptForm(clientIp);
-                            prompt.Approved += async (s, e) =>
-                            {
-                                _activeSessionId = sessionId;
-                                _banner.ShowSession(clientIp);
-                                AddLog($"Host user APPROVED session {sessionId.Substring(0, Math.Min(8, sessionId.Length))} from {clientIp}");
-
-                                await SendTextMessageAsync(new { type = "agent:approve-session", sessionId });
-                                _ = Task.Run(() => ScreenStreamLoopAsync(sessionId, _cts?.Token ?? CancellationToken.None));
-                            };
-                            prompt.Rejected += async (s, e) =>
-                            {
-                                AddLog($"Host user REJECTED session from {clientIp}");
-                                await SendTextMessageAsync(new { type = "agent:reject-session", sessionId, reason = "Host user declined connection" });
-                            };
-                            Application.Run(prompt);
-                        });
-                        staThread.SetApartmentState(ApartmentState.STA);
-                        staThread.Start();
+                        HandlePendingSessionRequest(root);
                         break;
-                    }
 
                     case "server:start-stream":
                     {
                         string sessionId = root.GetProperty("sessionId").GetString() ?? "";
-                        _activeSessionId = sessionId;
-                        Task.Run(() => ScreenStreamLoopAsync(sessionId, _cts?.Token ?? CancellationToken.None));
+                        StartSessionStreaming(sessionId);
+                        break;
+                    }
+
+                    case "server:signal":
+                    {
+                        if (root.TryGetProperty("signal", out var sig))
+                        {
+                            HandleSignalMessage(sig);
+                        }
                         break;
                     }
 
@@ -384,30 +391,10 @@ namespace RemoteHub.Agent
                         break;
                     }
 
-                    case "server:clipboard":
-                    {
-                        if (root.TryGetProperty("text", out var textProp))
-                        {
-                            string text = textProp.GetString() ?? "";
-                            if (!string.IsNullOrEmpty(text))
-                            {
-                                try
-                                {
-                                    Thread staThread = new Thread(() => Clipboard.SetText(text));
-                                    staThread.SetApartmentState(ApartmentState.STA);
-                                    staThread.Start();
-                                }
-                                catch {}
-                            }
-                        }
-                        break;
-                    }
-
                     case "server:session-terminate":
                     {
                         AddLog("Server instructed session termination.");
-                        _activeSessionId = null;
-                        _banner.HideSession();
+                        EndActiveSession("Server terminated session");
                         break;
                     }
                 }
@@ -416,6 +403,333 @@ namespace RemoteHub.Agent
             {
                 AddLog($"Server message parsing error: {ex.Message}");
             }
+        }
+
+        private void HandlePendingSessionRequest(JsonElement req)
+        {
+            if (_activeSessionId != null) return; // Already in active session
+
+            if (!req.TryGetProperty("sessionId", out var sessIdProp)) return;
+            string sessionId = sessIdProp.GetString() ?? "";
+            if (string.IsNullOrEmpty(sessionId)) return;
+
+            string clientIp = req.TryGetProperty("clientIp", out var ip) ? ip.GetString() ?? "" : "";
+
+            if (_config.PauseRemoteAccess)
+            {
+                AddLog($"Declined connection from {clientIp} (Remote Access is paused by host user)");
+                _ = SendSignalAsync(sessionId, "session-rejected", new { reason = "Host computer has temporarily paused remote access." });
+                return;
+            }
+
+            AddLog($"Remote session connection requested by {clientIp}. Prompting user on desktop...");
+
+            // Launch approval prompt on STA desktop thread
+            var staThread = new Thread(() =>
+            {
+                var prompt = new ApprovalPromptForm(clientIp);
+                prompt.Approved += async (s, e) =>
+                {
+                    AddLog($"Host user APPROVED remote session from {clientIp}");
+                    await ApproveSessionAsync(sessionId, clientIp);
+                };
+                prompt.Rejected += async (s, e) =>
+                {
+                    AddLog($"Host user REJECTED remote session from {clientIp}");
+                    await RejectSessionAsync(sessionId, "Host user declined connection");
+                };
+                Application.Run(prompt);
+            });
+            staThread.SetApartmentState(ApartmentState.STA);
+            staThread.Start();
+        }
+
+        private async Task ApproveSessionAsync(string sessionId, string clientIp)
+        {
+            _activeSessionId = sessionId;
+            _banner.ShowSession(clientIp);
+
+            // 1. Notify server via HTTP endpoint
+            try
+            {
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/approve";
+                await _httpClient.PostAsync(url, new StringContent("{}", Encoding.UTF8, "application/json"));
+            }
+            catch {}
+
+            // 2. Also send over WebSocket if open
+            await SendTextMessageAsync(new { type = "agent:approve-session", sessionId });
+
+            // 3. Start streaming & WebRTC signaling
+            StartSessionStreaming(sessionId);
+        }
+
+        private async Task RejectSessionAsync(string sessionId, string reason)
+        {
+            try
+            {
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/reject";
+                await _httpClient.PostAsync(url, new StringContent(JsonSerializer.Serialize(new { reason }), Encoding.UTF8, "application/json"));
+            }
+            catch {}
+
+            await SendTextMessageAsync(new { type = "agent:reject-session", sessionId, reason });
+            _activeSessionId = null;
+        }
+
+        private void StartSessionStreaming(string sessionId)
+        {
+            _activeSessionId = sessionId;
+            _sessionCts?.Cancel();
+            _sessionCts = new CancellationTokenSource();
+            var ct = _sessionCts.Token;
+
+            AddLog($"Initializing WebRTC and screen capture engine for session {sessionId.Substring(0, Math.Min(8, sessionId.Length))}...");
+
+            // Initialize WebRTC PeerConnection
+            _webRtc?.Dispose();
+            _webRtc = new WebRtcStreamingService();
+            _webRtc.LogMessage += (msg) => AddLog(msg);
+            _webRtc.IceCandidateGenerated += async (cand) =>
+            {
+                await SendSignalAsync(sessionId, "candidate", cand);
+            };
+
+            _webRtc.InitializePeerConnection();
+            _webRtc.ConfigureStream(_displayIndex, _quality, _fps);
+
+            // 1. Start HTTP signaling listener (polls for browser's SDP offer & ICE candidates)
+            Task.Run(() => SessionSignalingPollingLoopAsync(sessionId, ct));
+
+            // 2. Start dual screen streaming loop (WebRTC DataChannel + HTTP frame relay fallback)
+            Task.Run(() => DualScreenStreamLoopAsync(sessionId, ct));
+        }
+
+        private async Task SessionSignalingPollingLoopAsync(string sessionId, CancellationToken ct)
+        {
+            _lastSignalTimestamp = 0;
+
+            while (!ct.IsCancellationRequested && _activeSessionId == sessionId)
+            {
+                try
+                {
+                    string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/signal?receiver=agent&since={_lastSignalTimestamp}&timeout=2500";
+                    var res = await _httpClient.GetAsync(url, ct);
+
+                    if (res.IsSuccessStatusCode)
+                    {
+                        string body = await res.Content.ReadAsStringAsync(ct);
+                        using var doc = JsonDocument.Parse(body);
+                        var root = doc.RootElement;
+
+                        if (root.TryGetProperty("timestamp", out var tsProp))
+                        {
+                            _lastSignalTimestamp = tsProp.GetInt64();
+                        }
+
+                        if (root.TryGetProperty("signals", out var signalsArray) && signalsArray.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var item in signalsArray.EnumerateArray())
+                            {
+                                if (item.TryGetProperty("data", out var dataEl))
+                                {
+                                    HandleSignalMessage(dataEl);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch {}
+
+                await Task.Delay(300, ct).ContinueWith(_ => {}, CancellationToken.None);
+            }
+        }
+
+        private async void HandleSignalMessage(JsonElement sig)
+        {
+            if (!sig.TryGetProperty("type", out var typeProp)) return;
+            string type = typeProp.GetString() ?? "";
+
+            switch (type)
+            {
+                case "offer":
+                {
+                    if (sig.TryGetProperty("sdp", out var sdpProp))
+                    {
+                        string offerSdp = sdpProp.GetString() ?? "";
+                        AddLog("[WebRTC] Received SDP Offer from browser. Generating Answer...");
+                        if (_webRtc != null && !string.IsNullOrEmpty(offerSdp))
+                        {
+                            string answerSdp = await _webRtc.HandleOfferAsync(offerSdp);
+                            await SendSignalAsync(_activeSessionId ?? "", "answer", new { type = "answer", sdp = answerSdp });
+                        }
+                    }
+                    break;
+                }
+
+                case "candidate":
+                {
+                    if (sig.TryGetProperty("candidate", out var candProp))
+                    {
+                        string cand = candProp.TryGetProperty("candidate", out var c) ? c.GetString() ?? "" : "";
+                        string sdpMid = candProp.TryGetProperty("sdpMid", out var m) ? m.GetString() ?? "" : "";
+                        ushort sdpMLineIndex = candProp.TryGetProperty("sdpMLineIndex", out var idx) ? (ushort)idx.GetInt32() : (ushort)0;
+
+                        if (_webRtc != null && !string.IsNullOrEmpty(cand))
+                        {
+                            _webRtc.AddIceCandidate(cand, sdpMid, sdpMLineIndex);
+                        }
+                    }
+                    break;
+                }
+
+                case "input":
+                {
+                    if (sig.TryGetProperty("input", out var inputEl))
+                    {
+                        InputSimulator.ProcessInput(inputEl, _displayIndex);
+                    }
+                    break;
+                }
+
+                case "display-request":
+                {
+                    if (sig.TryGetProperty("displayIndex", out var dispIdx))
+                        _displayIndex = dispIdx.GetInt32();
+                    if (sig.TryGetProperty("quality", out var q))
+                        _quality = q.GetInt32();
+                    if (sig.TryGetProperty("fps", out var f))
+                        _fps = Math.Clamp(f.GetInt32(), 10, 60);
+                    _webRtc?.ConfigureStream(_displayIndex, _quality, _fps);
+                    break;
+                }
+            }
+        }
+
+        private async Task SendSignalAsync(string sessionId, string signalType, object payload)
+        {
+            if (string.IsNullOrEmpty(sessionId)) return;
+
+            try
+            {
+                var body = new
+                {
+                    sender = "agent",
+                    signal = payload
+                };
+
+                string json = JsonSerializer.Serialize(body);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/signal";
+
+                await _httpClient.PostAsync(url, content);
+            }
+            catch {}
+
+            // Also send over WebSocket if open
+            if (_ws != null && _ws.State == WebSocketState.Open)
+            {
+                await SendTextMessageAsync(new
+                {
+                    type = "agent:signal",
+                    sessionId,
+                    signal = payload
+                });
+            }
+        }
+
+        private async Task DualScreenStreamLoopAsync(string sessionId, CancellationToken ct)
+        {
+            AddLog($"[Stream] Desktop capture streaming active for session {sessionId.Substring(0, Math.Min(8, sessionId.Length))} (Quality: {_quality}%, Target FPS: {_fps})...");
+
+            int httpPostSkipCounter = 0;
+
+            while (!ct.IsCancellationRequested && _activeSessionId == sessionId)
+            {
+                try
+                {
+                    int delayMs = 1000 / Math.Max(10, _fps);
+                    byte[] jpegBytes = ScreenCaptureService.CaptureDisplayJpeg(_displayIndex, _quality, true);
+
+                    // 1. If WebRTC DataChannel is connected: Transmit frame directly peer-to-peer at high speed!
+                    if (_webRtc != null && _webRtc.IsDataChannelOpen)
+                    {
+                        // WebRTC internal loop handles DataChannel transmission
+                    }
+
+                    // 2. Also send over WebSocket if connected
+                    if (_ws != null && _ws.State == WebSocketState.Open)
+                    {
+                        await _ws.SendAsync(new ArraySegment<byte>(jpegBytes), WebSocketMessageType.Binary, true, ct);
+                    }
+
+                    // 3. HTTP Frame Relay fallback (posts frame every ~100ms so browser has zero black-screen lag)
+                    httpPostSkipCounter++;
+                    if (httpPostSkipCounter % 3 == 0)
+                    {
+                        _ = PostFrameToHttpRelayAsync(sessionId, jpegBytes);
+                    }
+
+                    await Task.Delay(delayMs, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    AddLog($"Stream frame loop exception: {ex.Message}");
+                    await Task.Delay(50, ct);
+                }
+            }
+
+            AddLog("[Stream] Screen stream ended.");
+        }
+
+        private async Task PostFrameToHttpRelayAsync(string sessionId, byte[] jpegBytes)
+        {
+            try
+            {
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/frame";
+                var content = new ByteArrayContent(jpegBytes);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/jpeg");
+                await _httpClient.PostAsync(url, content);
+            }
+            catch {}
+        }
+
+        private void EndActiveSession(string reason)
+        {
+            _activeSessionId = null;
+            _sessionCts?.Cancel();
+            _sessionCts = null;
+            _webRtc?.Dispose();
+            _webRtc = null;
+            _banner.HideSession();
+            AddLog($"Session closed: {reason}");
+        }
+
+        public void HandleEmergencyDisconnect()
+        {
+            AddLog("Emergency Disconnect triggered by host user!");
+            if (_activeSessionId != null)
+            {
+                string sessId = _activeSessionId;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessId}/disconnect";
+                        await _httpClient.PostAsync(url, new StringContent("{}", Encoding.UTF8, "application/json"));
+                    }
+                    catch {}
+                });
+            }
+            EndActiveSession("Host emergency disconnect");
         }
 
         private async Task SendTextMessageAsync(object payload)
@@ -432,50 +746,6 @@ namespace RemoteHub.Agent
             }
         }
 
-        private async Task ScreenStreamLoopAsync(string sessionId, CancellationToken ct)
-        {
-            AddLog($"Starting screen capture stream for session {sessionId.Substring(0, Math.Min(8, sessionId.Length))} (FPS: {_fps}, Quality: {_quality}%)...");
-            while (!ct.IsCancellationRequested && _activeSessionId == sessionId && _ws != null && _ws.State == WebSocketState.Open)
-            {
-                try
-                {
-                    int delayMs = 1000 / Math.Max(10, _fps);
-                    byte[] jpegBytes = ScreenCaptureService.CaptureDisplayJpeg(_displayIndex, _quality);
-
-                    await _ws.SendAsync(new ArraySegment<byte>(jpegBytes), WebSocketMessageType.Binary, true, ct);
-                    await Task.Delay(delayMs, ct);
-                }
-                catch (Exception ex)
-                {
-                    AddLog($"Screen stream frame error: {ex.Message}");
-                    break;
-                }
-            }
-            AddLog("Screen capture stream ended.");
-        }
-
-        public void HandleEmergencyDisconnect()
-        {
-            AddLog("Emergency Disconnect triggered by host user!");
-            if (_activeSessionId != null && _ws != null && _ws.State == WebSocketState.Open)
-            {
-                try
-                {
-                    var msg = new
-                    {
-                        type = "agent:emergency-disconnect",
-                        sessionId = _activeSessionId
-                    };
-                    string json = JsonSerializer.Serialize(msg);
-                    byte[] bytes = Encoding.UTF8.GetBytes(json);
-                    _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
-                }
-                catch {}
-            }
-            _activeSessionId = null;
-            _banner.HideSession();
-        }
-
         // Connection Test Utility
         public async Task<(bool Reachable, long LatencyMs, string Message)> TestServerConnectionAsync(string serverUrl)
         {
@@ -488,7 +758,6 @@ namespace RemoteHub.Agent
 
                 if (res.IsSuccessStatusCode)
                 {
-                    string body = await res.Content.ReadAsStringAsync();
                     return (true, sw.ElapsedMilliseconds, $"✓ Reachable (HTTP {(int)res.StatusCode}, {sw.ElapsedMilliseconds}ms)");
                 }
                 else
@@ -503,127 +772,101 @@ namespace RemoteHub.Agent
             }
         }
 
-        // Device Rename Utility
+        // Rename Device
         public async Task<(bool Success, string Message)> RenameDeviceAsync(string newName)
         {
-            if (!_config.IsConfigured || string.IsNullOrEmpty(newName))
-            {
-                return (false, "Device not paired or name is empty.");
-            }
+            if (!_config.IsConfigured || string.IsNullOrWhiteSpace(newName))
+                return (false, "Device is not configured or name is empty.");
 
             try
             {
                 string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}";
                 var payload = new { deviceName = newName.Trim() };
-                string json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
-                using var req = new HttpRequestMessage(HttpMethod.Patch, url) { Content = content };
-                req.Headers.Add("Authorization", $"Bearer {_config.AuthToken}");
+                using var request = new HttpRequestMessage(HttpMethod.Patch, url) { Content = content };
+                request.Headers.Add("Authorization", $"Bearer {_config.AuthToken}");
 
-                var res = await _httpClient.SendAsync(req);
+                var res = await _httpClient.SendAsync(request);
                 if (res.IsSuccessStatusCode)
                 {
                     _config.DeviceName = newName.Trim();
                     _config.Save();
-                    AddLog($"Device renamed to: {_config.DeviceName}");
-                    return (true, "Computer name updated successfully.");
+                    AddLog($"Device successfully renamed to '{newName.Trim()}'");
+                    return (true, $"Computer successfully renamed to '{newName.Trim()}'.");
                 }
                 else
                 {
-                    return (false, $"Rename failed (HTTP {(int)res.StatusCode}).");
+                    return (false, $"Server returned error (HTTP {(int)res.StatusCode}).");
                 }
             }
             catch (Exception ex)
             {
-                return (false, $"Rename error: {ex.Message}");
+                AddLog($"Device renaming failed: {ex.Message}");
+                return (false, $"Network error: {ex.Message}");
             }
         }
 
-        // Change Permanent Access PIN Utility
+        // Change Permanent Access PIN
         public async Task<(bool Success, string Message)> ChangePinAsync(string currentPin, string newPin)
         {
-            if (!_config.IsConfigured)
-            {
-                return (false, "Device is not currently paired.");
-            }
+            if (!_config.IsConfigured || string.IsNullOrWhiteSpace(newPin))
+                return (false, "Device is not configured or PIN is empty.");
 
             try
             {
-                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}/change-pin";
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}/pin";
                 var payload = new { currentPin, newPin };
-                string json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
-                using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
-                req.Headers.Add("Authorization", $"Bearer {_config.AuthToken}");
+                using var request = new HttpRequestMessage(HttpMethod.Put, url) { Content = content };
+                request.Headers.Add("Authorization", $"Bearer {_config.AuthToken}");
 
-                var res = await _httpClient.SendAsync(req);
-                string resBody = await res.Content.ReadAsStringAsync();
-
+                var res = await _httpClient.SendAsync(request);
                 if (res.IsSuccessStatusCode)
                 {
-                    AddLog("Permanent access PIN changed successfully.");
-                    return (true, "Access PIN updated successfully.");
+                    AddLog("Permanent Access PIN updated successfully on server.");
+                    return (true, "Permanent access PIN updated successfully.");
                 }
                 else
                 {
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(resBody);
-                        string err = doc.RootElement.GetProperty("error").GetString() ?? "Failed to change PIN.";
-                        return (false, err);
-                    }
-                    catch
-                    {
-                        return (false, $"Failed to change PIN (HTTP {(int)res.StatusCode})");
-                    }
+                    return (false, $"Failed to update PIN (HTTP {(int)res.StatusCode}).");
                 }
             }
             catch (Exception ex)
             {
-                return (false, $"Error updating PIN: {ex.Message}");
+                AddLog($"PIN update failed: {ex.Message}");
+                return (false, $"Network error: {ex.Message}");
             }
         }
 
+        // Export Diagnostic Report
         public string ExportDiagnosticReport()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("=================================================================");
-            sb.AppendLine("           REMOTEHUB WINDOWS AGENT DIAGNOSTIC REPORT            ");
-            sb.AppendLine("=================================================================");
+            sb.AppendLine("==================================================");
+            sb.AppendLine("           REMOTEHUB AGENT DIAGNOSTIC REPORT      ");
+            sb.AppendLine("==================================================");
             sb.AppendLine($"Generated At: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            sb.AppendLine($"Device ID: {_config.DeviceId}");
+            sb.AppendLine($"Device Name: {_config.DeviceName}");
+            sb.AppendLine($"Installation ID: {_config.InstallationId}");
+            sb.AppendLine($"Server URL: {_config.ServerUrl}");
+            sb.AppendLine($"State: {State}");
+            sb.AppendLine($"Last Heartbeat: {LastSuccessfulHeartbeat?.ToString("HH:mm:ss") ?? "Never"}");
+            sb.AppendLine($"WebRTC PeerConnection: {_webRtc?.ConnectionState.ToString() ?? "Inactive"}");
+            sb.AppendLine($"WebRTC ICE State: {_webRtc?.IceState.ToString() ?? "Inactive"}");
+            sb.AppendLine($"Active Session: {_activeSessionId ?? "None"}");
+            sb.AppendLine($"Operating System: {Environment.OSVersion}");
             sb.AppendLine($"Machine Name: {Environment.MachineName}");
-            sb.AppendLine($"OS Version:   {Environment.OSVersion}");
-            sb.AppendLine($".NET Runtime: {Environment.Version}");
+            sb.AppendLine($"Process Uptime: {Process.GetCurrentProcess().TotalProcessorTime.TotalSeconds:F1}s");
             sb.AppendLine();
-            sb.AppendLine("--- AGENT CONFIGURATION ---");
-            sb.AppendLine($"Device Name:      {_config.DeviceName}");
-            sb.AppendLine($"Device ID:        {_config.DeviceId}");
-            sb.AppendLine($"Installation ID:  {_config.InstallationId}");
-            sb.AppendLine($"Server URL:       {_config.ServerUrl}");
-            sb.AppendLine($"Is Paired:        {_config.IsConfigured}");
-            sb.AppendLine($"AutoStart:        {_config.AutoStart}");
-            sb.AppendLine($"PauseRemoteAccess:{_config.PauseRemoteAccess}");
-            sb.AppendLine();
-            sb.AppendLine("--- STATUS & TELEMETRY ---");
-            sb.AppendLine($"Current State:    {State}");
-            sb.AppendLine($"Last Heartbeat:   {(LastSuccessfulHeartbeat.HasValue ? LastSuccessfulHeartbeat.Value.ToString("HH:mm:ss") : "Never")}");
-            sb.AppendLine($"Active Session:   {(_activeSessionId ?? "None")}");
-
-            var metrics = MetricsCollector.Collect();
-            sb.AppendLine($"Local IP Address: {metrics.IpAddress}");
-            sb.AppendLine($"MAC Address:      {metrics.MacAddress}");
-            sb.AppendLine($"CPU Usage:        {metrics.CpuUsage}%");
-            sb.AppendLine($"RAM Usage:        {metrics.MemoryUsage}% ({metrics.MemoryUsedMb}MB / {metrics.MemoryTotalMb}MB)");
-            sb.AppendLine($"Battery:          {metrics.BatteryPercent}% (Charging: {metrics.IsCharging})");
-            sb.AppendLine();
-            sb.AppendLine("--- RECENT DIAGNOSTIC LOGS ---");
-            foreach (var log in _logs)
+            sb.AppendLine("RECENT DIAGNOSTIC LOGS:");
+            foreach (var log in DiagnosticLogs)
             {
                 sb.AppendLine(log);
             }
-            sb.AppendLine("=================================================================");
+            sb.AppendLine("==================================================");
             return sb.ToString();
         }
     }

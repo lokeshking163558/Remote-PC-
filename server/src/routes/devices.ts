@@ -10,7 +10,12 @@ import {
   sendWakeOnLan
 } from '../security.js';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
-import { notifyUserDashboard } from '../websocket.js';
+import {
+  notifyUserDashboard,
+  setDevicePendingRequest,
+  getDevicePendingRequest,
+  clearDevicePendingRequest
+} from '../websocket.js';
 
 export const devicesRouter = Router();
 
@@ -353,10 +358,41 @@ devicesRouter.post('/heartbeat', async (req, res) => {
       lastSeen: now
     });
 
-    return res.json({ success: true, timestamp: now });
+    const pendingSession = getDevicePendingRequest(deviceId);
+    return res.json({ success: true, timestamp: now, pendingSession });
   } catch (err: any) {
     console.error('Heartbeat error:', err);
     return res.status(500).json({ error: 'Heartbeat failed' });
+  }
+});
+
+// 6b. Agent polling endpoint (HTTP fallback for serverless environments where WebSockets fail)
+devicesRouter.get('/:id/agent-poll', async (req, res) => {
+  try {
+    const deviceId = req.params.id;
+    const token = req.query.token as string || req.headers.authorization?.replace('Bearer ', '');
+
+    if (!deviceId || !token) {
+      return res.status(401).json({ error: 'Missing device credentials' });
+    }
+
+    const device = await queryOne('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?', [deviceId]);
+    if (!device || device.auth_token !== token) {
+      return res.status(401).json({ error: 'Invalid device credentials' });
+    }
+
+    const now = Date.now();
+    await execute("UPDATE devices SET device_status = 'online', last_seen = ? WHERE id = ?", [now, deviceId]);
+
+    const pendingSession = getDevicePendingRequest(deviceId);
+    return res.json({
+      success: true,
+      timestamp: now,
+      pendingSession: pendingSession || null
+    });
+  } catch (err: any) {
+    console.error('Agent poll error:', err);
+    return res.status(500).json({ error: 'Agent poll failed' });
   }
 });
 
@@ -559,6 +595,16 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
       INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, client_ip, created_at, started_at)
       VALUES (?, ?, ?, ?, 'authorized', 'authorized', 'pending', 'p2p_direct', ?, ?, ?)
     `, [sessionId, req.user!.id, deviceId, sessionToken, req.ip || '', now, now]);
+
+    // Dispatch pending session request to agent (works over active WebSocket OR HTTP agent polling)
+    setDevicePendingRequest(deviceId, {
+      sessionId,
+      sessionToken,
+      userId: req.user!.id,
+      clientIp: req.ip || '',
+      createdAt: now,
+      approvalStatus: 'pending'
+    });
 
     await execute(
       'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',

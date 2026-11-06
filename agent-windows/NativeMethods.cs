@@ -106,6 +106,39 @@ namespace RemoteHub.Agent
         public static extern bool GetSystemTimes(out System.Runtime.InteropServices.ComTypes.FILETIME lpIdleTime,
                                                 out System.Runtime.InteropServices.ComTypes.FILETIME lpKernelTime,
                                                 out System.Runtime.InteropServices.ComTypes.FILETIME lpUserTime);
+
+        public const int CURSOR_SHOWING = 0x00000001;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct CURSORINFO
+        {
+            public int cbSize;
+            public int flags;
+            public IntPtr hCursor;
+            public POINT ptScreenPos;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct ICONINFO
+        {
+            public bool fIcon;
+            public int xHotspot;
+            public int yHotspot;
+            public IntPtr hbmMask;
+            public IntPtr hbmColor;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool GetCursorInfo(out CURSORINFO pci);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool DrawIcon(IntPtr hDC, int X, int Y, IntPtr hIcon);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
+
+        [DllImport("gdi32.dll", SetLastError = true)]
+        public static extern bool DeleteObject(IntPtr hObject);
     }
 }
 
