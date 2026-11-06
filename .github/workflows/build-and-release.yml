@@ -36,7 +36,8 @@ jobs:
         run: |
           $bin = "release-dist/RemoteHubAgent.exe"
           $hash = (Get-FileHash $bin -Algorithm SHA256).Hash
-          $notes = "Product: RemoteHub Desktop Agent`nVersion: 1.2.0`nPlatform: Windows 10 / Windows 11 (x64)`nFramework: Microsoft .NET 8.0 Windows Desktop (Self-Contained Single File)`nExecutable: RemoteHubAgent.exe`nSHA-256 Checksum: $hash`nRelease Notes: Production release featuring system tray execution, DXGI and GDI screen capture with live mouse cursor overlay, WebRTC P2P DataChannel streaming, HTTP dual-transport signaling fallback, and Win32 SendInput simulation."
+          $refName = "${{ github.ref_name }}" ? "${{ github.ref_name }}" : "v1.3.0"
+          $notes = "Product: RemoteHub Desktop Agent`nVersion: $refName`nPlatform: Windows 10 / Windows 11 (x64)`nFramework: Microsoft .NET 8.0 Windows Desktop (Self-Contained Single File)`nExecutable: RemoteHubAgent.exe`nSHA-256 Checksum: $hash`nRelease Notes: Production release featuring Windows DPAPI hardware-bound credential encryption, one-time device pairing, Trusted 1-Click Access mode, system tray execution, DXGI and GDI screen capture with live mouse cursor overlay, WebRTC P2P DataChannel streaming, HTTP dual-transport signaling fallback, and Win32 SendInput simulation."
           Set-Content -Path "windows-agent.txt" -Value $notes
           Copy-Item "windows-agent.txt" "server/downloads/windows-agent.txt" -Force
           Get-Content "windows-agent.txt"

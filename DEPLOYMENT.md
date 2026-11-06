@@ -8,12 +8,21 @@ This guide provides end-to-end instructions for deploying RemoteHub to productio
 
 RemoteHub is composed of three interconnected parts:
 1. **Frontend Web App (`client/`)**: Single-page application built with React 19, Vite, and Tailwind CSS. Hosted on **Vercel** or any static hosting platform.
-2. **Backend Gateway & Signaling Server (`server/`)**: Express REST API + WebSocket Server (`ws`) for device heartbeats, WebRTC signaling, screen frame relays, and binary agent downloads. Requires a **persistent Node.js runtime** (Render, Railway, Fly.io, or VPS).
+2. **Backend Gateway & Signaling Server (`server/`)**: Express REST API + WebSocket Server (`ws`) for device heartbeats, WebRTC signaling, screen frame relays, and binary agent downloads. Supports dual-mode transport: persistent WebSockets or serverless HTTP polling.
 3. **Database Layer**: Dual-mode engine supporting **PostgreSQL** in production (via `DATABASE_URL`) with automatic schema initialization and SQLite fallback for local development.
 
 > [!IMPORTANT]
-> **Why Vercel Serverless Cannot Host the Backend WebSockets:**
-> Vercel's serverless functions are stateless, ephemeral lambdas with strict request execution timeouts (10–15 seconds). They terminate immediately after an HTTP response. WebSockets and WebRTC signaling require persistent, bi-directional TCP connections to track real-time agent heartbeats, receive screen frames, and forward low-latency mouse/keyboard inputs. Therefore, the **backend must be hosted on a persistent Node.js environment** (e.g., Render, Railway, Docker, or VPS), while the **frontend runs smoothly on Vercel**.
+> **Permanent Database Persistence (Eliminating Login Failures & Lost Devices):**
+> If your server runs on Vercel Serverless without a `DATABASE_URL`, each serverless cold-start or container recycled will spin up a fresh temporary container where SQLite resets, causing "Invalid email or password" or disappearing devices.
+> 
+> **To make user accounts, permanent sessions, and paired devices completely permanent:**
+> 1. Create a free PostgreSQL database on [Neon](https://neon.tech), [Supabase](https://supabase.com), or [Render](https://render.com).
+> 2. Copy the Connection String URI (e.g. `postgresql://user:password@ep-cool-fog-12345.us-east-2.aws.neon.tech/neondb?sslmode=require`).
+> 3. Add `DATABASE_URL` to your Vercel Environment Variables:
+>    - Go to **Vercel Project Dashboard** -> **Settings** -> **Environment Variables**.
+>    - Add Name: `DATABASE_URL`, Value: `<Your-PostgreSQL-URI>`.
+>    - Also ensure `JWT_SECRET` is set to a fixed random string (e.g., `remotehub-master-jwt-secret-2026`).
+> 4. Redeploy the server. RemoteHub will automatically connect to PostgreSQL and run all required migrations on startup. Your sessions, users, and devices will now persist forever!
 
 ---
 

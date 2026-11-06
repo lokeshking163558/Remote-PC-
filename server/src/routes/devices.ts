@@ -34,6 +34,7 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
         d.mac_address AS "macAddress",
         d.installation_id AS "installationId",
         d.wake_support AS "wakeSupport",
+        d.trusted_mode AS "trustedMode",
         d.created_at AS "registeredAt",
         CASE WHEN c.pin_hash IS NOT NULL THEN true ELSE false END AS "hasPin",
         c.failed_attempts AS "failedAttempts",
@@ -86,6 +87,7 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
           installationId: d.installationId || null,
           registeredAt: Number(d.registeredAt),
           hasPin: Boolean(d.hasPin),
+          trustedMode: d.trustedMode === undefined || d.trustedMode === null ? true : Boolean(d.trustedMode),
           isLocked,
           lockoutUntil: Number(d.lockoutUntil),
           latestMetrics: latestMetrics || null
@@ -498,17 +500,13 @@ devicesRouter.delete('/:id', requireAuth, async (req: AuthenticatedRequest, res:
   }
 });
 
-// 9. POST /api/devices/:id/verify-pin & POST /api/devices/:id/connect (Initiate remote session with PIN)
+// 9. POST /api/devices/:id/verify-pin & POST /api/devices/:id/connect (Initiate remote session with PIN or Trusted Mode)
 const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { pin } = req.body;
     const deviceId = req.params.id;
 
-    if (!pin) {
-      return res.status(400).json({ error: 'Access PIN is required' });
-    }
-
-    const device = await queryOne('SELECT id, device_name, device_status FROM devices WHERE id = ? AND user_id = ?', [
+    const device = await queryOne('SELECT id, device_name, device_status, trusted_mode FROM devices WHERE id = ? AND user_id = ?', [
       deviceId,
       req.user!.id
     ]);
@@ -522,70 +520,80 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
     }
 
     const creds = await queryOne('SELECT * FROM device_credentials WHERE device_id = ?', [deviceId]);
-    if (!creds || !creds.pin_hash) {
-      return res.status(400).json({ error: 'No PIN has been configured for this computer' });
-    }
+    const isTrustedMode = device.trusted_mode === undefined || device.trusted_mode === null || Number(device.trusted_mode) !== 0;
 
-    const now = Date.now();
-    const lockoutUntil = Number(creds.lockout_until);
-
-    if (lockoutUntil > now) {
-      const remainingSeconds = Math.ceil((lockoutUntil - now) / 1000);
-      const remainingMinutes = Math.ceil(remainingSeconds / 60);
-
-      await execute(
-        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [req.user!.id, deviceId, 'pin_attempt_blocked', 'Attempt while locked out', req.ip || '', now]
-      );
-
-      return res.status(429).json({
-        error: `PIN verification is locked due to too many failed attempts. Try again in ${remainingMinutes} minute(s).`,
-        locked: true,
-        remainingSeconds
-      });
-    }
-
-    const isMatch = verifyPin(pin, creds.pin_hash, creds.pin_salt);
-
-    if (!isMatch) {
-      const failedAttempts = (creds.failed_attempts || 0) + 1;
-      let newLockout = 0;
-      let delayMs = 1000;
-
-      if (failedAttempts >= 5) {
-        newLockout = now + 15 * 60 * 1000; // 15 mins
-      } else if (failedAttempts >= 3) {
-        delayMs = 3000;
+    // Enforce PIN validation only if not in trusted mode OR if a PIN was explicitly provided
+    if (!isTrustedMode || pin) {
+      if (!pin) {
+        return res.status(400).json({ error: 'Access PIN is required for this computer' });
       }
 
-      await execute('UPDATE device_credentials SET failed_attempts = ?, lockout_until = ? WHERE device_id = ?', [
-        failedAttempts,
-        newLockout,
-        deviceId
-      ]);
+      if (!creds || !creds.pin_hash) {
+        return res.status(400).json({ error: 'No PIN has been configured for this computer' });
+      }
 
-      await execute(
-        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [req.user!.id, deviceId, 'pin_failed', `Failed attempt #${failedAttempts}`, req.ip || '', now]
-      );
+      const now = Date.now();
+      const lockoutUntil = Number(creds.lockout_until);
 
-      await new Promise((r) => setTimeout(r, delayMs));
+      if (lockoutUntil > now) {
+        const remainingSeconds = Math.ceil((lockoutUntil - now) / 1000);
+        const remainingMinutes = Math.ceil(remainingSeconds / 60);
 
-      if (newLockout > 0) {
+        await execute(
+          'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [req.user!.id, deviceId, 'pin_attempt_blocked', 'Attempt while locked out', req.ip || '', now]
+        );
+
         return res.status(429).json({
-          error: 'Maximum failed PIN attempts exceeded. Device locked for 15 minutes.',
+          error: `PIN verification is locked due to too many failed attempts. Try again in ${remainingMinutes} minute(s).`,
           locked: true,
-          remainingSeconds: 15 * 60
+          remainingSeconds
         });
       }
 
-      return res.status(401).json({
-        error: `Invalid PIN. ${5 - failedAttempts} attempts remaining before temporary lockout.`,
-        attemptsRemaining: 5 - failedAttempts
-      });
-    }
+      const isMatch = verifyPin(pin, creds.pin_hash, creds.pin_salt);
 
-    // PIN verified successfully
+      if (!isMatch) {
+        const failedAttempts = (creds.failed_attempts || 0) + 1;
+        let newLockout = 0;
+        let delayMs = 1000;
+
+        if (failedAttempts >= 5) {
+          newLockout = now + 15 * 60 * 1000; // 15 mins
+        } else if (failedAttempts >= 3) {
+          delayMs = 3000;
+        }
+
+        await execute('UPDATE device_credentials SET failed_attempts = ?, lockout_until = ? WHERE device_id = ?', [
+          failedAttempts,
+          newLockout,
+          deviceId
+        ]);
+
+        await execute(
+          'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [req.user!.id, deviceId, 'pin_failed', `Failed attempt #${failedAttempts}`, req.ip || '', now]
+        );
+
+        await new Promise((r) => setTimeout(r, delayMs));
+
+        if (newLockout > 0) {
+          return res.status(429).json({
+            error: 'Maximum failed PIN attempts exceeded. Device locked for 15 minutes.',
+            locked: true,
+            remainingSeconds: 15 * 60
+          });
+        }
+
+        return res.status(401).json({
+          error: `Invalid PIN. ${5 - failedAttempts} attempts remaining before temporary lockout.`,
+          attemptsRemaining: 5 - failedAttempts
+        });
+      }
+
+      // PIN verified successfully
+      await execute('UPDATE device_credentials SET failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [deviceId]);
+    }
     await execute('UPDATE device_credentials SET failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [deviceId]);
 
     const sessionId = crypto.randomUUID();
@@ -628,6 +636,27 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
 
 devicesRouter.post('/:id/verify-pin', requireAuth, handleConnectAndPin);
 devicesRouter.post('/:id/connect', requireAuth, handleConnectAndPin);
+
+// Toggle Trusted Account Mode (1-Click Connect vs PIN-Protected)
+devicesRouter.patch('/:id/trusted-mode', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { trustedMode } = req.body;
+    const deviceId = req.params.id;
+
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND user_id = ?', [deviceId, req.user!.id]);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const modeVal = trustedMode ? 1 : 0;
+    await execute('UPDATE devices SET trusted_mode = ? WHERE id = ?', [modeVal, deviceId]);
+
+    return res.json({ success: true, trustedMode: Boolean(modeVal) });
+  } catch (err: any) {
+    console.error('Update trusted mode error:', err);
+    return res.status(500).json({ error: 'Failed to update trusted mode' });
+  }
+});
 
 // 10. Change Device PIN
 devicesRouter.post('/:id/change-pin', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

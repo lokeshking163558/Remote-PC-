@@ -1,72 +1,168 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { api } from '../services/api';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { api, getAuthToken, getRefreshToken, clearAuthTokens } from '../services/api';
 
-interface User {
+export type AuthState = 'loading' | 'authenticated' | 'unauthenticated' | 'session_expired' | 'network_unavailable';
+
+export interface User {
   id: string;
   email: string;
   fullName: string;
+  avatarUrl?: string | null;
   createdAt?: number;
 }
 
 interface AuthContextType {
   user: User | null;
   token: string | null;
+  authState: AuthState;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (email: string, pass: string) => Promise<void>;
+  errorMessage: string | null;
+  login: (email: string, pass: string, rememberMe?: boolean) => Promise<void>;
+  loginWithGoogle: (credential: string) => Promise<void>;
   register: (email: string, pass: string, fullName: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
+  logoutAll: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  retrySession: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('remotehub_token'));
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [token, setToken] = useState<string | null>(getAuthToken());
+  const [authState, setAuthState] = useState<AuthState>('loading');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const refreshUser = async () => {
-    if (!token) {
+  const restoreSession = useCallback(async () => {
+    setAuthState('loading');
+    setErrorMessage(null);
+
+    const storedToken = getAuthToken();
+    const storedRefresh = getRefreshToken();
+
+    // If neither access token nor refresh token exists, user is unauthenticated
+    if (!storedToken && !storedRefresh) {
       setUser(null);
-      setIsLoading(false);
+      setToken(null);
+      setAuthState('unauthenticated');
       return;
     }
 
     try {
       const res = await api.getMe();
       setUser(res.user);
-    } catch {
-      localStorage.removeItem('remotehub_token');
-      setToken(null);
-      setUser(null);
-    } finally {
-      setIsLoading(false);
+      setToken(getAuthToken());
+      setAuthState('authenticated');
+    } catch (err: any) {
+      console.warn('[Auth] Session restoration check returned error:', err);
+
+      // Distinguish explicit authentication rejection from temporary network/server issues
+      if (err.status === 401 || err.message?.includes('401') || err.message?.includes('expired') || err.message?.includes('invalid')) {
+        // Attempt one silent refresh if a refresh token exists
+        try {
+          const newToken = await api.refreshToken();
+          if (newToken) {
+            const retryRes = await api.getMe();
+            setUser(retryRes.user);
+            setToken(newToken);
+            setAuthState('authenticated');
+            return;
+          }
+        } catch {
+          // Refresh token is genuinely invalid or revoked
+        }
+
+        clearAuthTokens();
+        setUser(null);
+        setToken(null);
+        setAuthState('session_expired');
+        setErrorMessage('Your session has expired. Please sign in again.');
+      } else {
+        // Network unavailable, offline, or transient server 5xx
+        // Never log out the user due to a temporary network interruption!
+        console.warn('[Auth] Network or server temporary issue during restore; preserving user state if present');
+        if (storedToken) {
+          // If we had a token, treat as network_unavailable or optimistic authenticated
+          setAuthState('network_unavailable');
+          setErrorMessage('Unable to connect to the authentication server. Please check your connection.');
+        } else {
+          setAuthState('unauthenticated');
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    restoreSession();
+  }, [restoreSession]);
+
+  const login = async (email: string, pass: string, rememberMe: boolean = true) => {
+    setAuthState('loading');
+    setErrorMessage(null);
+    try {
+      const res = await api.login({ email, password: pass, rememberMe });
+      setToken(res.token);
+      setUser(res.user);
+      setAuthState('authenticated');
+    } catch (err: any) {
+      setAuthState('unauthenticated');
+      setErrorMessage(err.message || 'Invalid email or password');
+      throw err;
     }
   };
 
-  useEffect(() => {
-    refreshUser();
-  }, [token]);
-
-  const login = async (email: string, pass: string) => {
-    const res = await api.login({ email, password: pass });
-    localStorage.setItem('remotehub_token', res.token);
-    setToken(res.token);
-    setUser(res.user);
+  const loginWithGoogle = async (credential: string) => {
+    setAuthState('loading');
+    setErrorMessage(null);
+    try {
+      const res = await api.loginWithGoogle(credential);
+      setToken(res.token);
+      setUser(res.user);
+      setAuthState('authenticated');
+    } catch (err: any) {
+      setAuthState('unauthenticated');
+      setErrorMessage(err.message || 'Google sign-in failed');
+      throw err;
+    }
   };
 
   const register = async (email: string, pass: string, fullName: string) => {
-    const res = await api.register({ email, password: pass, fullName });
-    localStorage.setItem('remotehub_token', res.token);
-    setToken(res.token);
-    setUser(res.user);
+    setAuthState('loading');
+    setErrorMessage(null);
+    try {
+      const res = await api.register({ email, password: pass, fullName });
+      setToken(res.token);
+      setUser(res.user);
+      setAuthState('authenticated');
+    } catch (err: any) {
+      setAuthState('unauthenticated');
+      setErrorMessage(err.message || 'Registration failed');
+      throw err;
+    }
   };
 
-  const logout = () => {
-    localStorage.removeItem('remotehub_token');
-    setToken(null);
+  const logout = async () => {
+    setAuthState('loading');
+    await api.logout();
     setUser(null);
+    setToken(null);
+    setAuthState('unauthenticated');
+    setErrorMessage(null);
+  };
+
+  const logoutAll = async () => {
+    setAuthState('loading');
+    await api.logoutAll();
+    setUser(null);
+    setToken(null);
+    setAuthState('unauthenticated');
+    setErrorMessage(null);
+  };
+
+  const refreshUser = async () => {
+    await restoreSession();
   };
 
   return (
@@ -74,12 +170,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         user,
         token,
-        isAuthenticated: !!user,
-        isLoading,
+        authState,
+        isAuthenticated: authState === 'authenticated',
+        isLoading: authState === 'loading',
+        errorMessage,
         login,
+        loginWithGoogle,
         register,
         logout,
-        refreshUser
+        logoutAll,
+        refreshUser,
+        retrySession: restoreSession
       }}
     >
       {children}
@@ -94,4 +195,3 @@ export const useAuth = () => {
   }
   return context;
 };
-

@@ -207,61 +207,99 @@ namespace RemoteHub.Agent
             top += 175;
 
             // Pairing Section Panel
-            _pnlPairing = CreateCard(16, top, 570, 250);
-            _pnlPairing.Controls.Add(CreateHeaderLabel("Device Pairing", 16, 12));
-
-            var lblDesc = new Label
-            {
-                Text = "Enter the 6-digit pairing code from your web dashboard and configure an access PIN:",
-                Location = new Point(16, 36),
-                Width = 538,
-                ForeColor = Color.FromArgb(209, 213, 219),
-                Font = new Font("Segoe UI", 9f)
-            };
-            _pnlPairing.Controls.Add(lblDesc);
-
-            _pnlPairing.Controls.Add(CreateLabel("6-Digit Pairing Code:", 16, 68));
-            _txtPairCode = CreateTextBox("", 16, 88, 160);
-            _txtPairCode.MaxLength = 6;
-            _pnlPairing.Controls.Add(_txtPairCode);
-
-            _pnlPairing.Controls.Add(CreateLabel("Permanent Access PIN (6-8 Digits):", 190, 68));
-            _txtPairPin = CreateTextBox("", 190, 88, 170);
-            _txtPairPin.PasswordChar = '●';
-            _txtPairPin.MaxLength = 8;
-            _pnlPairing.Controls.Add(_txtPairPin);
-
-            _pnlPairing.Controls.Add(CreateLabel("Computer Name:", 374, 68));
-            _txtPairName = CreateTextBox(_config.DeviceName, 374, 88, 180);
-            _pnlPairing.Controls.Add(_txtPairName);
-
-            _btnPair = new Button
-            {
-                Text = "Pair This Computer",
-                Location = new Point(16, 128),
-                Width = 538,
-                Height = 36,
-                BackColor = Color.FromArgb(37, 99, 235),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            _btnPair.FlatAppearance.BorderSize = 0;
-            _btnPair.Click += async (s, e) => await HandlePairAsync();
-            _pnlPairing.Controls.Add(_btnPair);
-
-            _lblPairStatus = new Label
-            {
-                Text = _config.IsConfigured ? "✓ This computer is currently paired with RemoteHub." : "Awaiting pairing with your RemoteHub account.",
-                Location = new Point(16, 176),
-                Width = 538,
-                ForeColor = _config.IsConfigured ? Color.FromArgb(52, 211, 153) : Color.FromArgb(156, 163, 175)
-            };
-            _pnlPairing.Controls.Add(_lblPairStatus);
-
+            _pnlPairing = CreateCard(16, top, 570, 230);
+            UpdatePairingPanelContents();
             tab.Controls.Add(_pnlPairing);
             return tab;
+        }
+
+        private void UpdatePairingPanelContents()
+        {
+            _pnlPairing.Controls.Clear();
+
+            if (_config.IsConfigured)
+            {
+                _pnlPairing.Controls.Add(CreateHeaderLabel("✓ Linked to RemoteHub Account", 16, 12));
+
+                var lblDesc = new Label
+                {
+                    Text = "This computer is permanently registered to your RemoteHub account.",
+                    Location = new Point(16, 38),
+                    Width = 538,
+                    ForeColor = Color.FromArgb(52, 211, 153),
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+                };
+                _pnlPairing.Controls.Add(lblDesc);
+
+                var lblDetails = new Label
+                {
+                    Text = $"Computer Name: {_config.DeviceName}\n" +
+                           $"Device ID: {_config.DeviceId}\n" +
+                           $"Automatic Startup Reconnect: Enabled\n" +
+                           $"Credentials Store: Windows DPAPI Encrypted\n\n" +
+                           $"Ready for 1-Click Connect from your web dashboard without entering pairing codes.",
+                    Location = new Point(16, 68),
+                    Width = 538,
+                    Height = 110,
+                    ForeColor = Color.FromArgb(209, 213, 219),
+                    Font = new Font("Segoe UI", 9f)
+                };
+                _pnlPairing.Controls.Add(lblDetails);
+            }
+            else
+            {
+                _pnlPairing.Controls.Add(CreateHeaderLabel("Device Initial Registration", 16, 12));
+
+                var lblDesc = new Label
+                {
+                    Text = "Enter the 6-digit pairing code from your web dashboard to register this computer once:",
+                    Location = new Point(16, 36),
+                    Width = 538,
+                    ForeColor = Color.FromArgb(209, 213, 219),
+                    Font = new Font("Segoe UI", 9f)
+                };
+                _pnlPairing.Controls.Add(lblDesc);
+
+                _pnlPairing.Controls.Add(CreateLabel("6-Digit Pairing Code:", 16, 68));
+                _txtPairCode = CreateTextBox("", 16, 88, 160);
+                _txtPairCode.MaxLength = 6;
+                _pnlPairing.Controls.Add(_txtPairCode);
+
+                _pnlPairing.Controls.Add(CreateLabel("Permanent Access PIN (6-8 Digits):", 190, 68));
+                _txtPairPin = CreateTextBox("", 190, 88, 170);
+                _txtPairPin.PasswordChar = '●';
+                _txtPairPin.MaxLength = 8;
+                _pnlPairing.Controls.Add(_txtPairPin);
+
+                _pnlPairing.Controls.Add(CreateLabel("Computer Name:", 374, 68));
+                _txtPairName = CreateTextBox(_config.DeviceName, 374, 88, 180);
+                _pnlPairing.Controls.Add(_txtPairName);
+
+                _btnPair = new Button
+                {
+                    Text = "Authorize & Register Computer",
+                    Location = new Point(16, 128),
+                    Width = 538,
+                    Height = 36,
+                    BackColor = Color.FromArgb(37, 99, 235),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                _btnPair.FlatAppearance.BorderSize = 0;
+                _btnPair.Click += async (s, e) => await HandlePairAsync();
+                _pnlPairing.Controls.Add(_btnPair);
+
+                _lblPairStatus = new Label
+                {
+                    Text = "Awaiting initial one-time pairing authorization.",
+                    Location = new Point(16, 176),
+                    Width = 538,
+                    ForeColor = Color.FromArgb(156, 163, 175)
+                };
+                _pnlPairing.Controls.Add(_lblPairStatus);
+            }
         }
 
         // TAB 2: DEVICE
@@ -349,8 +387,8 @@ namespace RemoteHub.Agent
                     _config.ResetPairing();
                     _client.Stop();
                     _lblDashStatus.Text = "Status: Unpaired";
-                    _lblPairStatus.Text = "Device unpaired. Enter a new code to pair.";
                     _lblDeviceId.Text = "(Unpaired)";
+                    UpdatePairingPanelContents();
                     DeviceUnpaired?.Invoke(this, EventArgs.Empty);
                 }
             };
@@ -705,7 +743,7 @@ namespace RemoteHub.Agent
                     _lblPairStatus.ForeColor = Color.FromArgb(52, 211, 153);
                     _lblDeviceId.Text = deviceId;
                     _lblHeaderDevice.Text = name;
-
+                    UpdatePairingPanelContents();
                     _client.Start();
                 }
                 else

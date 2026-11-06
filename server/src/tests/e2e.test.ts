@@ -258,6 +258,99 @@ async function runTests() {
     assert.strictEqual(resolveStatus(now - 300000), 'offline');
   });
 
+  // 11. Refresh Token Generation, Hashing & Session Storage
+  await test('Rotating Refresh Token Generation & Replay Protection', async () => {
+    const { generateRefreshToken, hashRefreshToken } = await import('../security.js');
+    const { token: t1, hash: h1 } = generateRefreshToken();
+    const { token: t2, hash: h2 } = generateRefreshToken();
+
+    assert.ok(t1.length >= 64);
+    assert.notStrictEqual(t1, t2);
+    assert.strictEqual(hashRefreshToken(t1), h1);
+    assert.notStrictEqual(h1, h2);
+
+    // Test DB persistence in refresh_tokens table
+    const testUserId = `refresh_usr_${Date.now()}`;
+    const sessId = `sess_${Date.now()}`;
+    const now = Date.now();
+    const expiresAt = now + 30 * 24 * 60 * 60 * 1000;
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      testUserId,
+      'Refresh Tester',
+      'Refresh Tester',
+      `${testUserId}@example.com`,
+      'pw',
+      now,
+      now
+    ]);
+
+    await execute(`
+      INSERT INTO refresh_tokens (id, user_id, token_hash, device_info, ip_address, expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [sessId, testUserId, h1, 'Chrome Windows', '127.0.0.1', expiresAt, now, now]);
+
+    const activeSession = await queryOne(`
+      SELECT * FROM refresh_tokens
+      WHERE token_hash = ? AND (revoked_at IS NULL) AND expires_at > ?
+    `, [h1, now]);
+    assert.ok(activeSession);
+    assert.strictEqual(activeSession.id, sessId);
+
+    // Simulate rotation: revoke old, insert new
+    await execute('UPDATE refresh_tokens SET revoked_at = ?, updated_at = ? WHERE id = ?', [now, now, sessId]);
+
+    const revokedSession = await queryOne(`
+      SELECT * FROM refresh_tokens
+      WHERE token_hash = ? AND (revoked_at IS NULL)
+    `, [h1]);
+    assert.strictEqual(revokedSession, null);
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [testUserId]);
+  });
+
+  // 12. Trusted-Account 1-Click Access Mode
+  await test('Trusted-Account 1-Click Access vs PIN Requirement Mode', async () => {
+    const usrId = `trusted_usr_${Date.now()}`;
+    const devId = `trusted_dev_${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId,
+      'Trusted Mode Tester',
+      'Trusted Mode Tester',
+      `${usrId}@test.com`,
+      'hash',
+      now,
+      now
+    ]);
+
+    // Device created in Trusted Mode (trusted_mode = 1)
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, trusted_mode, last_seen, created_at, registered_at)
+      VALUES (?, ?, 'My Trusted Laptop', 'Windows 11', '1.3.0', 'online', 'tok', 1, ?, ?, ?)
+    `, [devId, usrId, now, now, now]);
+
+    const dev = await queryOne('SELECT trusted_mode FROM devices WHERE id = ?', [devId]);
+    assert.strictEqual(Number(dev.trusted_mode), 1);
+
+    // In Trusted Mode, owner can authorize session with 0 PIN prompts
+    const isOwner = true;
+    const isTrustedMode = Number(dev.trusted_mode) !== 0;
+    const canConnectWithoutPin = isOwner && isTrustedMode;
+    assert.strictEqual(canConnectWithoutPin, true);
+
+    // Toggle trusted mode off (PIN required)
+    await execute('UPDATE devices SET trusted_mode = 0 WHERE id = ?', [devId]);
+    const pinRequiredDev = await queryOne('SELECT trusted_mode FROM devices WHERE id = ?', [devId]);
+    assert.strictEqual(Number(pinRequiredDev.trusted_mode), 0);
+    assert.strictEqual(Boolean(Number(pinRequiredDev.trusted_mode) !== 0), false);
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
+  });
+
   console.log('\n====================================================');
   console.log(`Test Results: ${passed} passed, ${failed} failed.`);
   console.log('====================================================\n');

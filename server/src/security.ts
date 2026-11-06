@@ -40,8 +40,22 @@ export function verifyPin(pin: string, storedHash: string, salt: string): boolea
   }
 }
 
-export function generateToken(payload: object, expiresIn: string | number = '7d'): string {
+export function generateToken(payload: object, expiresIn: string | number = '15m'): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: expiresIn as any });
+}
+
+export function generateAccessToken(payload: object, expiresIn: string | number = '15m'): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: expiresIn as any });
+}
+
+export function generateRefreshToken(): { token: string; hash: string } {
+  const token = crypto.randomBytes(40).toString('hex');
+  const hash = hashRefreshToken(token);
+  return { token, hash };
+}
+
+export function hashRefreshToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 export function verifyToken<T>(token: string): T | null {

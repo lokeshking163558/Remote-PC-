@@ -1,6 +1,9 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace RemoteHub.Agent
 {
@@ -11,7 +14,18 @@ namespace RemoteHub.Agent
 
         public string ServerUrl { get; set; } = DefaultProductionServerUrl;
         public string DeviceId { get; set; } = string.Empty;
+
+        // In-memory decrypted AuthToken (never stored as plaintext if DPAPI succeeds)
+        [JsonIgnore]
         public string AuthToken { get; set; } = string.Empty;
+
+        // DPAPI-encrypted token saved to disk
+        public string AuthTokenProtected { get; set; } = string.Empty;
+
+        // Legacy compatibility field for reading old configs
+        [JsonPropertyName("AuthToken")]
+        public string? LegacyAuthToken { get; set; }
+
         public string InstallationId { get; set; } = string.Empty;
         public string DeviceName { get; set; } = Environment.MachineName;
         public string AccountEmail { get; set; } = string.Empty;
@@ -41,6 +55,19 @@ namespace RemoteHub.Agent
                 else
                 {
                     cfg = new AgentConfig();
+                }
+
+                // Restore AuthToken from DPAPI protected field or migrate legacy plaintext
+                if (!string.IsNullOrEmpty(cfg.AuthTokenProtected))
+                {
+                    cfg.AuthToken = UnprotectString(cfg.AuthTokenProtected);
+                }
+                else if (!string.IsNullOrEmpty(cfg.LegacyAuthToken))
+                {
+                    cfg.AuthToken = cfg.LegacyAuthToken;
+                    cfg.AuthTokenProtected = ProtectString(cfg.AuthToken);
+                    cfg.LegacyAuthToken = null;
+                    cfg.Save();
                 }
 
                 // Ensure a persistent stable InstallationId
@@ -89,6 +116,18 @@ namespace RemoteHub.Agent
                     File.WriteAllText(InstallationIdFilePath, InstallationId);
                 }
 
+                // Encrypt AuthToken with Windows DPAPI before writing to disk
+                if (!string.IsNullOrEmpty(AuthToken))
+                {
+                    AuthTokenProtected = ProtectString(AuthToken);
+                }
+                else
+                {
+                    AuthTokenProtected = string.Empty;
+                }
+
+                LegacyAuthToken = null; // Clean up legacy plaintext
+
                 string json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(ConfigFilePath, json);
             }
@@ -102,11 +141,42 @@ namespace RemoteHub.Agent
         {
             DeviceId = string.Empty;
             AuthToken = string.Empty;
+            AuthTokenProtected = string.Empty;
+            LegacyAuthToken = null;
             AccountEmail = string.Empty;
             Save();
         }
 
         public bool IsConfigured => !string.IsNullOrEmpty(DeviceId) && !string.IsNullOrEmpty(AuthToken);
+
+        private static string ProtectString(string plainText)
+        {
+            if (string.IsNullOrEmpty(plainText)) return string.Empty;
+            try
+            {
+                byte[] plainBytes = Encoding.UTF8.GetBytes(plainText);
+                byte[] cipherBytes = ProtectedData.Protect(plainBytes, null, DataProtectionScope.CurrentUser);
+                return Convert.ToBase64String(cipherBytes);
+            }
+            catch
+            {
+                return plainText; // Fallback if DPAPI is unavailable
+            }
+        }
+
+        private static string UnprotectString(string cipherText)
+        {
+            if (string.IsNullOrEmpty(cipherText)) return string.Empty;
+            try
+            {
+                byte[] cipherBytes = Convert.FromBase64String(cipherText);
+                byte[] plainBytes = ProtectedData.Unprotect(cipherBytes, null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(plainBytes);
+            }
+            catch
+            {
+                return cipherText; // Return as-is if plain
+            }
+        }
     }
 }
-

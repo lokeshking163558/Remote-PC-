@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import express from 'express';
 import cors from 'cors';
-import { initDatabase } from './db.js';
+import { initDatabase, getDatabaseStatus } from './db.js';
 import { setupWebSocketServer } from './websocket.js';
 import { authRouter } from './routes/auth.js';
 import { devicesRouter } from './routes/devices.js';
@@ -21,6 +21,23 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '10mb' }));
+
+// Lightweight cookie parsing middleware
+app.use((req, res, next) => {
+  const cookieHeader = req.headers.cookie;
+  const cookies: Record<string, string> = {};
+  if (cookieHeader) {
+    cookieHeader.split(';').forEach((cookie) => {
+      const parts = cookie.split('=');
+      const name = parts.shift()?.trim();
+      if (name) {
+        cookies[name] = decodeURIComponent(parts.join('=').trim());
+      }
+    });
+  }
+  (req as any).cookies = cookies;
+  next();
+});
 
 // Request logging in development
 app.use((req, res, next) => {
@@ -40,6 +57,7 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     service: 'RemoteHub Backend & Signaling',
     uptime: process.uptime(),
+    database: getDatabaseStatus(),
     timestamp: Date.now()
   });
 });
@@ -50,6 +68,7 @@ app.use('/api/devices', devicesRouter);
 app.use('/api/sessions', sessionsRouter);
 
 // Endpoints to download the Windows RemoteHub Agent and metadata
+const GITHUB_RELEASE_AGENT_EXE = 'https://github.com/lokeshking163558/Remote-PC-/releases/latest/download/RemoteHubAgent.exe';
 const DIRECT_GITHUB_AGENT_EXE = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/server/downloads/RemoteHubAgent.exe';
 const DIRECT_GITHUB_AGENT_TXT = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/windows-agent.txt';
 
@@ -70,8 +89,8 @@ app.get('/api/downloads/windows-agent', (req, res) => {
     }
   }
 
-  // High-reliability fallback to committed GitHub repository binary (Guaranteed 200 OK)
-  return res.redirect(DIRECT_GITHUB_AGENT_EXE);
+  // High-reliability fallback to published GitHub release binary (Guaranteed 200 OK CDN)
+  return res.redirect(GITHUB_RELEASE_AGENT_EXE);
 });
 
 app.get('/api/downloads/windows-agent.txt', (req, res) => {
@@ -95,13 +114,13 @@ app.get('/api/downloads/windows-agent.txt', (req, res) => {
 
 app.get('/api/downloads/info', (req, res) => {
   res.json({
-    version: '1.2.0',
+    version: '1.3.0',
     platform: 'Windows 10 / Windows 11 (x64)',
-    sha256: '798232DF3576AB9C21885E006E495D9F734DE9725EBFDC3C63AD00FC93C4DB9D',
+    sha256: '6A904572989993C0416BBB4FE0F86CFEA35AA246B3DEF9C4C7B9DA752EB6879D',
     filename: 'RemoteHubAgent.exe',
     downloadUrl: '/api/downloads/windows-agent',
-    directGithubUrl: DIRECT_GITHUB_AGENT_EXE,
-    githubReleaseUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.2.0/RemoteHubAgent.exe',
+    directGithubUrl: GITHUB_RELEASE_AGENT_EXE,
+    githubReleaseUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.0/RemoteHubAgent.exe',
     githubLatestUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/latest',
     metadataUrl: '/api/downloads/windows-agent.txt'
   });

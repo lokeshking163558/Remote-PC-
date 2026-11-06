@@ -13,9 +13,10 @@ if (isPostgres) {
   console.log('[DB] Connecting to PostgreSQL database...');
   pgPool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+    ssl: process.env.DATABASE_URL?.includes('localhost') ? undefined : { rejectUnauthorized: false },
     max: 10,
-    idleTimeoutMillis: 30000
+    connectionTimeoutMillis: 5000,
+    idleTimeoutMillis: 10000
   });
 
   pgPool.on('error', (err) => {
@@ -38,6 +39,16 @@ if (isPostgres) {
   sqliteDb = new DatabaseSync(dbPath);
   sqliteDb.exec('PRAGMA journal_mode = WAL;');
   sqliteDb.exec('PRAGMA foreign_keys = ON;');
+}
+
+export function getDatabaseStatus() {
+  return {
+    engine: isPostgres ? 'postgresql' : 'sqlite',
+    isPersistent: isPostgres,
+    isPostgres,
+    hasPool: !!pgPool,
+    hasSqlite: !!sqliteDb
+  };
 }
 
 /**
@@ -172,12 +183,30 @@ export async function initDatabase(): Promise<void> {
       );
 
       ALTER TABLE devices ADD COLUMN IF NOT EXISTS installation_id VARCHAR(128);
+      ALTER TABLE devices ADD COLUMN IF NOT EXISTS trusted_mode INT DEFAULT 1;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(255) NOT NULL UNIQUE,
+        device_info TEXT,
+        ip_address VARCHAR(45),
+        expires_at BIGINT NOT NULL,
+        revoked_at BIGINT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
       CREATE INDEX IF NOT EXISTS idx_devices_installation ON devices(installation_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON remote_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_device_id ON remote_sessions(device_id);
       CREATE INDEX IF NOT EXISTS idx_metrics_device_id ON device_metrics(device_id, collected_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
     `);
     console.log('[DB] PostgreSQL schema migrations verified.');
     return;
@@ -267,11 +296,26 @@ export async function initDatabase(): Promise<void> {
         created_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        device_info TEXT,
+        ip_address TEXT,
+        expires_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+      );
+
       CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices (user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON remote_sessions (user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_device_id ON remote_sessions (device_id);
       CREATE INDEX IF NOT EXISTS idx_metrics_device_id ON device_metrics (device_id, collected_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs (user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens (user_id);
+      CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens (token_hash);
     `);
 
     // Safe column migrations for existing SQLite databases
@@ -285,6 +329,12 @@ export async function initDatabase(): Promise<void> {
       if (!userColNames.includes('full_name')) {
         sqliteDb.exec('ALTER TABLE users ADD COLUMN full_name TEXT');
         sqliteDb.exec('UPDATE users SET full_name = name WHERE name IS NOT NULL');
+      }
+      if (!userColNames.includes('google_id')) {
+        sqliteDb.exec('ALTER TABLE users ADD COLUMN google_id TEXT');
+      }
+      if (!userColNames.includes('avatar_url')) {
+        sqliteDb.exec('ALTER TABLE users ADD COLUMN avatar_url TEXT');
       }
     } catch {}
 
@@ -316,6 +366,9 @@ export async function initDatabase(): Promise<void> {
       }
       if (!devColNames.includes('installation_id')) {
         sqliteDb.exec('ALTER TABLE devices ADD COLUMN installation_id TEXT');
+      }
+      if (!devColNames.includes('trusted_mode')) {
+        sqliteDb.exec('ALTER TABLE devices ADD COLUMN trusted_mode INTEGER DEFAULT 1');
       }
     } catch {}
 

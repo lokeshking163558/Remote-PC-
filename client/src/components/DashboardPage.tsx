@@ -27,6 +27,7 @@ interface Device {
   agentVersion: string;
   onlineStatus: boolean;
   deviceStatus?: 'online' | 'reconnecting' | 'offline';
+  trustedMode?: boolean;
   lastSeen: number;
   lastSeenSecondsAgo?: number;
   installationId?: string;
@@ -49,12 +50,14 @@ interface DashboardPageProps {
   onConnectDevice: (device: Device) => void;
   onOpenDetails: (deviceId: string) => void;
   onAddDevice: () => void;
+  connectingDeviceId?: string | null;
 }
 
 export const DashboardPage: React.FC<DashboardPageProps> = ({
   onConnectDevice,
   onOpenDetails,
-  onAddDevice
+  onAddDevice,
+  connectingDeviceId
 }) => {
   const { user } = useAuth();
   const [devices, setDevices] = useState<Device[]>([]);
@@ -358,10 +361,23 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                     </div>
                   )}
 
-                  {/* Security Badge */}
-                  <div className="flex items-center gap-1 text-[11px] text-gray-400 mb-5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Protected with permanent access PIN</span>
+                  {/* Security & Access Mode Badge */}
+                  <div className="flex items-center justify-between text-[11px] text-gray-400 mb-5">
+                    <span className="flex items-center gap-1">
+                      <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+                      <span>{device.trustedMode !== false ? 'Trusted 1-Click Access' : 'PIN Protected'}</span>
+                    </span>
+                    <button
+                      onClick={async () => {
+                        const newMode = device.trustedMode === false ? true : false;
+                        await api.setTrustedMode(device.id, newMode);
+                        fetchDevices();
+                      }}
+                      className="text-[10px] text-blue-400 hover:text-blue-300 underline"
+                      title="Toggle 1-Click Connect vs PIN requirement"
+                    >
+                      {device.trustedMode !== false ? 'Require PIN' : 'Enable 1-Click'}
+                    </button>
                   </div>
                 </div>
 
@@ -369,11 +385,20 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                 <div className="grid grid-cols-2 gap-2 pt-2 border-t border-gray-800/60">
                   <button
                     onClick={() => onConnectDevice(device)}
-                    disabled={device.deviceStatus === 'offline'}
+                    disabled={device.deviceStatus === 'offline' || connectingDeviceId === device.id}
                     className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white font-semibold text-xs transition-all shadow-md shadow-blue-600/20 active:scale-95"
                   >
-                    <Power className="w-3.5 h-3.5" />
-                    Connect
+                    {connectingDeviceId === device.id ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        <span>Connecting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Power className="w-3.5 h-3.5" />
+                        <span>{device.trustedMode !== false ? '1-Click Connect' : 'Connect'}</span>
+                      </>
+                    )}
                   </button>
 
                   <button
