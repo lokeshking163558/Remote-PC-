@@ -485,7 +485,7 @@ const devicePendingRequests = new Map<string, any>();
 const latestSessionFrames = new Map<string, { buffer: Buffer; timestamp: number }>();
 const signalWaiters = new Map<string, Array<{ receiver: string; resolve: (signals: QueuedSignal[]) => void }>>();
 
-export function queueSessionSignal(sessionId: string, sender: 'client' | 'agent', data: any) {
+export async function queueSessionSignal(sessionId: string, sender: 'client' | 'agent', data: any): Promise<void> {
   if (!sessionSignalQueues.has(sessionId)) {
     sessionSignalQueues.set(sessionId, []);
   }
@@ -502,11 +502,13 @@ export function queueSessionSignal(sessionId: string, sender: 'client' | 'agent'
     queue.splice(0, queue.length - 200);
   }
 
-  // Persist to database for cross-instance serverless signaling
-  execute(
-    'INSERT INTO session_signals (id, session_id, sender, data, timestamp) VALUES (?, ?, ?, ?, ?)',
-    [signalItem.id, sessionId, sender, JSON.stringify(data), signalItem.timestamp]
-  ).catch(() => {});
+  // Persist to database for cross-instance serverless signaling (awaited so serverless container doesn't freeze before write)
+  try {
+    await execute(
+      'INSERT INTO session_signals (id, session_id, sender, data, timestamp) VALUES (?, ?, ?, ?, ?)',
+      [signalItem.id, sessionId, sender, JSON.stringify(data), signalItem.timestamp]
+    );
+  } catch {}
 
   // Wake up any long-polling listeners
   const waiters = signalWaiters.get(sessionId);
@@ -661,19 +663,21 @@ export function clearDevicePendingRequest(deviceId: string, sessionId?: string) 
   }
 }
 
-export function storeSessionFrame(sessionId: string, buffer: Buffer) {
+export async function storeSessionFrame(sessionId: string, buffer: Buffer): Promise<void> {
   latestSessionFrames.set(sessionId, { buffer, timestamp: Date.now() });
 
-  // Store in database / shared store for multi-container retrieval
+  // Store in database / shared store for multi-container retrieval (awaited)
   try {
     const base64 = buffer.toString('base64');
-    execute(
+    await execute(
       isPostgres
         ? 'INSERT INTO session_frames (session_id, frame_data, timestamp) VALUES ($1, $2, $3) ON CONFLICT (session_id) DO UPDATE SET frame_data = $2, timestamp = $3'
         : 'INSERT OR REPLACE INTO session_frames (session_id, frame_data, timestamp) VALUES (?, ?, ?)',
       [sessionId, base64, Date.now()]
-    ).catch(() => {});
-  } catch {}
+    );
+  } catch (err) {
+    console.warn('[Frame] DB frame store warning:', err);
+  }
 
   // Also deliver to client WebSocket if open
   const session = activeSessions.get(sessionId);
@@ -684,15 +688,15 @@ export function storeSessionFrame(sessionId: string, buffer: Buffer) {
 
 export async function getSessionFrame(sessionId: string): Promise<Buffer | null> {
   const item = latestSessionFrames.get(sessionId);
-  if (item && Date.now() - item.timestamp < 6000) {
+  if (item && Date.now() - item.timestamp < 30000) {
     return item.buffer;
   }
 
-  // Cross-container DB fallback
+  // Cross-container DB fallback (allows 30s buffer threshold)
   try {
     const row = await queryOne(
       'SELECT frame_data, timestamp FROM session_frames WHERE session_id = ? AND timestamp > ?',
-      [sessionId, Date.now() - 6000]
+      [sessionId, Date.now() - 30000]
     );
     if (row && row.frame_data) {
       const buf = Buffer.from(row.frame_data, 'base64');

@@ -295,7 +295,7 @@ sessionsRouter.post('/:id/input', async (req, res) => {
 });
 
 // 10. POST /api/sessions/:id/frame (Frame relay fallback from Agent)
-sessionsRouter.post('/:id/frame', (req, res) => {
+sessionsRouter.post('/:id/frame', async (req, res) => {
   try {
     const sessionId = req.params.id;
     let buffer: Buffer | null = null;
@@ -309,7 +309,7 @@ sessionsRouter.post('/:id/frame', (req, res) => {
     }
 
     if (buffer && buffer.length > 0) {
-      storeSessionFrame(sessionId, buffer);
+      await storeSessionFrame(sessionId, buffer);
       return res.json({ success: true, timestamp: Date.now() });
     }
 
