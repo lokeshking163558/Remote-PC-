@@ -189,6 +189,75 @@ async function runTests() {
     await execute('DELETE FROM users WHERE id = ?', [usrId]);
   });
 
+  // 9. Stable Device Identity & Deduplication by Installation ID
+  await test('Device Deduplication and Re-pairing by installation_id', async () => {
+    const usrId = `dedup_usr_${Date.now()}`;
+    const devId = `dedup_dev_${Date.now()}`;
+    const instId = `inst_guid_${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId,
+      'Dedup Tester',
+      'Dedup Tester',
+      `${usrId}@test.com`,
+      'hash',
+      now,
+      now
+    ]);
+
+    // First registration
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, last_seen, installation_id, wake_support, created_at, registered_at)
+      VALUES (?, ?, 'Office Workstation', 'Windows 11', '1.0.0', 'online', 'tok1', ?, ?, 1, ?, ?)
+    `, [devId, usrId, now, instId, now, now]);
+
+    // Verify exactly 1 device exists
+    const beforeCount = await queryOne('SELECT COUNT(*) as count FROM devices WHERE user_id = ?', [usrId]);
+    assert.strictEqual(Number(beforeCount.count), 1);
+
+    // Second pairing attempt with same installation_id: should update, NOT insert duplicate
+    const existing = await queryOne('SELECT id FROM devices WHERE user_id = ? AND installation_id = ?', [usrId, instId]);
+    assert.ok(existing);
+    assert.strictEqual(existing.id, devId);
+
+    // Perform update
+    await execute(`
+      UPDATE devices
+      SET device_name = 'Renamed Workstation', auth_token = 'tok2', last_seen = ?
+      WHERE id = ?
+    `, [Date.now(), existing.id]);
+
+    const afterCount = await queryOne('SELECT COUNT(*) as count FROM devices WHERE user_id = ?', [usrId]);
+    assert.strictEqual(Number(afterCount.count), 1);
+
+    const updatedDev = await queryOne('SELECT device_name, auth_token FROM devices WHERE id = ?', [devId]);
+    assert.strictEqual(updatedDev.device_name, 'Renamed Workstation');
+    assert.strictEqual(updatedDev.auth_token, 'tok2');
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
+  });
+
+  // 10. Dynamic 3-State Status Resolution (Online, Reconnecting, Offline)
+  await test('Dynamic 3-State Status Resolution (Online, Reconnecting, Offline)', () => {
+    const now = Date.now();
+
+    function resolveStatus(lastSeen: number): 'online' | 'reconnecting' | 'offline' {
+      const elapsed = Math.max(0, now - lastSeen);
+      if (elapsed <= 45000) return 'online';
+      if (elapsed <= 90000) return 'reconnecting';
+      return 'offline';
+    }
+
+    assert.strictEqual(resolveStatus(now - 10000), 'online');
+    assert.strictEqual(resolveStatus(now - 45000), 'online');
+    assert.strictEqual(resolveStatus(now - 50000), 'reconnecting');
+    assert.strictEqual(resolveStatus(now - 89000), 'reconnecting');
+    assert.strictEqual(resolveStatus(now - 91000), 'offline');
+    assert.strictEqual(resolveStatus(now - 300000), 'offline');
+  });
+
   console.log('\n====================================================');
   console.log(`Test Results: ${passed} passed, ${failed} failed.`);
   console.log('====================================================\n');

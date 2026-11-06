@@ -2,36 +2,32 @@
 setlocal enabledelayedexpansion
 
 echo ========================================================
-echo        RemoteHub Windows Desktop Agent Installer        
+echo        RemoteHub Windows Desktop Agent Setup        
 echo ========================================================
 echo.
 
-set "TARGET_DIR=%LOCALAPPDATA%\RemoteHub\bin"
-set "SOURCE_DIR=%~dp0agent-windows\bin\Release\net8.0-windows"
+set "SOURCE_EXE=%~dp0server\downloads\RemoteHubAgent.exe"
+if not exist "!SOURCE_EXE!" (
+    set "SOURCE_EXE=%~dp0agent-windows\bin\Release\net8.0-windows\RemoteHubAgent.exe"
+)
 
-if not exist "!SOURCE_DIR!\RemoteHubAgent.exe" (
-    echo [ERROR] Agent binary not found at !SOURCE_DIR!\RemoteHubAgent.exe
-    echo Please build the project first using dotnet build.
+if not exist "!SOURCE_EXE!" (
+    echo [ERROR] Agent binary not found.
+    echo Please compile the agent or check server/downloads/RemoteHubAgent.exe
     pause
     exit /b 1
 )
 
-echo [*] Creating application directory: !TARGET_DIR!
-if not exist "!TARGET_DIR!" mkdir "!TARGET_DIR!"
-
-echo [*] Copying RemoteHub Agent binaries...
-xcopy /Y /E /I "!SOURCE_DIR!\*" "!TARGET_DIR!\" >nul
-
-echo [*] Configuring Windows Startup shortcut...
-powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([Environment]::GetFolderPath('Startup') + '\RemoteHubAgent.lnk'); $s.TargetPath = '!TARGET_DIR!\RemoteHubAgent.exe'; $s.WorkingDirectory = '!TARGET_DIR!'; $s.Save()"
-
-echo [*] Starting RemoteHub Agent...
-start "" "!TARGET_DIR!\RemoteHubAgent.exe"
+echo [*] Installing RemoteHub Agent into Windows...
+"!SOURCE_EXE!" --install
 
 echo.
 echo ========================================================
-echo [SUCCESS] RemoteHub Agent installed and launched!
-echo Check your system tray (bottom-right of taskbar).
+echo [SUCCESS] RemoteHub Agent has been installed!
+echo - Available in Windows Start Menu ("RemoteHub Agent")
+echo - Available in Windows Search
+echo - Visible in Windows Settings -> Apps -> Installed apps
+echo - Desktop shortcut created
 echo ========================================================
 echo.
 pause

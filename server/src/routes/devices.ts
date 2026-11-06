@@ -10,6 +10,7 @@ import {
   sendWakeOnLan
 } from '../security.js';
 import { requireAuth, AuthenticatedRequest } from '../middleware/auth.js';
+import { notifyUserDashboard } from '../websocket.js';
 
 export const devicesRouter = Router();
 
@@ -26,6 +27,7 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
         d.last_seen AS "lastSeen",
         d.local_ip AS "localIp",
         d.mac_address AS "macAddress",
+        d.installation_id AS "installationId",
         d.wake_support AS "wakeSupport",
         d.created_at AS "registeredAt",
         CASE WHEN c.pin_hash IS NOT NULL THEN true ELSE false END AS "hasPin",
@@ -34,9 +36,10 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
       FROM devices d
       LEFT JOIN device_credentials c ON d.id = c.device_id
       WHERE d.user_id = ?
-      ORDER BY d.device_status ASC, d.last_seen DESC
+      ORDER BY d.last_seen DESC
     `, [req.user!.id]);
 
+    const now = Date.now();
     const formattedDevices = await Promise.all(
       devices.map(async (d: any) => {
         const latestMetrics = await queryOne(`
@@ -48,8 +51,21 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
           LIMIT 1
         `, [d.id]);
 
-        const isOnline = d.deviceStatus === 'online';
-        const isLocked = Number(d.lockoutUntil) > Date.now();
+        const lastSeen = Number(d.lastSeen);
+        const elapsedMs = Math.max(0, now - lastSeen);
+
+        // 3-State Dynamic Resolution based on server time and 90s stale threshold
+        let dynamicStatus: 'online' | 'reconnecting' | 'offline';
+        if (elapsedMs <= 45000) {
+          dynamicStatus = 'online';
+        } else if (elapsedMs <= 90000) {
+          dynamicStatus = 'reconnecting';
+        } else {
+          dynamicStatus = 'offline';
+        }
+
+        const isOnline = dynamicStatus === 'online';
+        const isLocked = Number(d.lockoutUntil) > now;
 
         return {
           id: d.id,
@@ -57,10 +73,12 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
           os: d.os,
           agentVersion: d.agentVersion,
           onlineStatus: isOnline,
-          deviceStatus: d.deviceStatus,
-          lastSeen: Number(d.lastSeen),
+          deviceStatus: dynamicStatus,
+          lastSeen,
+          lastSeenSecondsAgo: Math.floor(elapsedMs / 1000),
           localIp: d.localIp,
           macAddress: d.macAddress,
+          installationId: d.installationId || null,
           registeredAt: Number(d.registeredAt),
           hasPin: Boolean(d.hasPin),
           isLocked,
@@ -105,7 +123,7 @@ devicesRouter.post('/generate-pairing-code', requireAuth, async (req: Authentica
 // 3. Pair device using a pairing code (Agent setup)
 devicesRouter.post('/pair', async (req, res) => {
   try {
-    const { pairingCode, deviceName, os, pin, agentVersion, macAddress, localIp } = req.body;
+    const { pairingCode, deviceName, os, pin, agentVersion, macAddress, localIp, installationId, existingDeviceId } = req.body;
 
     if (!pairingCode || !deviceName || !pin) {
       return res.status(400).json({ error: 'Pairing code, device name, and access PIN are required' });
@@ -125,46 +143,118 @@ devicesRouter.post('/pair', async (req, res) => {
     }
 
     const userId = pairRecord.user_id;
-    const deviceId = crypto.randomUUID();
-    const authToken = generateDeviceAuthToken();
     const now = Date.now();
-
-    await execute(`
-      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, last_seen, local_ip, mac_address, wake_support, created_at)
-      VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, 1, ?)
-    `, [
-      deviceId,
-      userId,
-      deviceName.trim(),
-      os || 'Windows',
-      agentVersion || '1.0.0',
-      authToken,
-      now,
-      localIp || null,
-      macAddress || null,
-      now
-    ]);
-
+    const authToken = generateDeviceAuthToken();
     const { hash, salt } = hashPin(pin);
-    await execute(`
-      INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at)
-      VALUES (?, ?, ?, 0, 0, ?)
-    `, [deviceId, hash, salt, now]);
 
-    // Consume pairing code
+    // Look up existing device for this user to prevent duplicate registrations
+    let existingDevice: any = null;
+    if (installationId) {
+      existingDevice = await queryOne(
+        'SELECT id, device_name FROM devices WHERE user_id = ? AND installation_id = ?',
+        [userId, installationId]
+      );
+    }
+
+    if (!existingDevice && existingDeviceId) {
+      existingDevice = await queryOne(
+        'SELECT id, device_name FROM devices WHERE user_id = ? AND id = ?',
+        [userId, existingDeviceId]
+      );
+    }
+
+    if (!existingDevice && macAddress) {
+      existingDevice = await queryOne(
+        'SELECT id, device_name FROM devices WHERE user_id = ? AND mac_address = ? AND device_name = ?',
+        [userId, macAddress, deviceName.trim()]
+      );
+    }
+
+    let finalDeviceId: string;
+
+    if (existingDevice) {
+      // Re-use and update existing device record
+      finalDeviceId = existingDevice.id;
+      await execute(`
+        UPDATE devices
+        SET device_name = ?, operating_system = ?, agent_version = ?,
+            device_status = 'online', auth_token = ?, last_seen = ?,
+            local_ip = COALESCE(?, local_ip), mac_address = COALESCE(?, mac_address),
+            installation_id = COALESCE(?, installation_id)
+        WHERE id = ?
+      `, [
+        deviceName.trim(),
+        os || 'Windows',
+        agentVersion || '1.0.0',
+        authToken,
+        now,
+        localIp || null,
+        macAddress || null,
+        installationId || null,
+        finalDeviceId
+      ]);
+
+      const existingCreds = await queryOne('SELECT device_id FROM device_credentials WHERE device_id = ?', [finalDeviceId]);
+      if (existingCreds) {
+        await execute(`
+          UPDATE device_credentials
+          SET pin_hash = ?, pin_salt = ?, failed_attempts = 0, lockout_until = 0, updated_at = ?
+          WHERE device_id = ?
+        `, [hash, salt, now, finalDeviceId]);
+      } else {
+        await execute(`
+          INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at)
+          VALUES (?, ?, ?, 0, 0, ?)
+        `, [finalDeviceId, hash, salt, now]);
+      }
+
+      await execute(
+        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, finalDeviceId, 'device_repaired', `Existing device updated: ${deviceName.trim()}`, req.ip || '', now]
+      );
+    } else {
+      // Create new device record
+      finalDeviceId = crypto.randomUUID();
+      await execute(`
+        INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, last_seen, local_ip, mac_address, installation_id, wake_support, created_at)
+        VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, 1, ?)
+      `, [
+        finalDeviceId,
+        userId,
+        deviceName.trim(),
+        os || 'Windows',
+        agentVersion || '1.0.0',
+        authToken,
+        now,
+        localIp || null,
+        macAddress || null,
+        installationId || null,
+        now
+      ]);
+
+      await execute(`
+        INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at)
+        VALUES (?, ?, ?, 0, 0, ?)
+      `, [finalDeviceId, hash, salt, now]);
+
+      await execute(
+        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, finalDeviceId, 'device_paired', `New device paired: ${deviceName.trim()}`, req.ip || '', now]
+      );
+    }
+
+    // Invalidate single-use pairing code
     await execute('DELETE FROM pairing_codes WHERE code = ?', [pairingCode]);
-
-    await execute(
-      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, deviceId, 'device_paired', `Device paired: ${deviceName.trim()}`, req.ip || '', now]
-    );
 
     return res.status(201).json({
       success: true,
-      deviceId,
+      deviceId: finalDeviceId,
       authToken,
       deviceName: deviceName.trim(),
-      message: 'Device successfully paired and registered to RemoteHub'
+      isExisting: !!existingDevice,
+      message: existingDevice
+        ? 'Existing computer successfully re-paired and updated'
+        : 'Device successfully paired and registered to RemoteHub'
     });
   } catch (err: any) {
     console.error('Device pairing error:', err);
@@ -254,6 +344,14 @@ devicesRouter.post('/heartbeat', async (req, res) => {
         now
       ]);
     }
+
+    notifyUserDashboard(device.user_id, {
+      type: 'device:status-change',
+      deviceId,
+      onlineStatus: true,
+      deviceStatus: 'online',
+      lastSeen: now
+    });
 
     return res.json({ success: true, timestamp: now });
   } catch (err: any) {

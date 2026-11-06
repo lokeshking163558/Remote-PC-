@@ -112,6 +112,7 @@ export async function initDatabase(): Promise<void> {
         last_seen BIGINT NOT NULL,
         local_ip VARCHAR(100),
         mac_address VARCHAR(100),
+        installation_id VARCHAR(128),
         wake_support INT NOT NULL DEFAULT 1,
         created_at BIGINT NOT NULL,
         registered_at BIGINT
@@ -170,7 +171,9 @@ export async function initDatabase(): Promise<void> {
         created_at BIGINT NOT NULL
       );
 
+      ALTER TABLE devices ADD COLUMN IF NOT EXISTS installation_id VARCHAR(128);
       CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
+      CREATE INDEX IF NOT EXISTS idx_devices_installation ON devices(installation_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON remote_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_device_id ON remote_sessions(device_id);
       CREATE INDEX IF NOT EXISTS idx_metrics_device_id ON device_metrics(device_id, collected_at DESC);
@@ -202,6 +205,7 @@ export async function initDatabase(): Promise<void> {
         last_seen INTEGER NOT NULL,
         local_ip TEXT,
         mac_address TEXT,
+        installation_id TEXT,
         wake_support INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
@@ -309,6 +313,9 @@ export async function initDatabase(): Promise<void> {
       if (!devColNames.includes('registered_at')) {
         sqliteDb.exec('ALTER TABLE devices ADD COLUMN registered_at INTEGER');
         sqliteDb.exec('UPDATE devices SET registered_at = created_at WHERE created_at IS NOT NULL');
+      }
+      if (!devColNames.includes('installation_id')) {
+        sqliteDb.exec('ALTER TABLE devices ADD COLUMN installation_id TEXT');
       }
     } catch {}
 

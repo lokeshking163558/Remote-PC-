@@ -185,7 +185,9 @@ namespace RemoteHub.Agent
                     pin = pin,
                     agentVersion = "1.0.0",
                     macAddress = metrics.MacAddress,
-                    localIp = metrics.IpAddress
+                    localIp = metrics.IpAddress,
+                    installationId = _config.InstallationId,
+                    existingDeviceId = _config.DeviceId
                 };
 
                 string json = JsonSerializer.Serialize(payload);

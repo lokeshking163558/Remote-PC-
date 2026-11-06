@@ -51,17 +51,19 @@ export function setupWebSocketServer(httpServer: HttpServer) {
     }
   });
 
-  // Background interval: sweep inactive devices (every 10s)
+  // Background interval: sweep inactive devices (every 15s)
   setInterval(async () => {
     const now = Date.now();
-    const staleThreshold = now - 45000;
+    const staleThreshold = now - 90000; // 90s stale threshold
+    const reconnectingThreshold = now - 45000; // 45s reconnecting threshold
     try {
+      // 1. Mark devices with no heartbeat for >90s as offline
       const offlineDevices = await query(`
-        SELECT id, user_id, device_name FROM devices WHERE device_status = 'online' AND last_seen < ?
+        SELECT id, user_id, device_name FROM devices WHERE device_status != 'offline' AND last_seen < ?
       `, [staleThreshold]);
 
       if (offlineDevices.length > 0) {
-        await execute("UPDATE devices SET device_status = 'offline' WHERE device_status = 'online' AND last_seen < ?", [
+        await execute("UPDATE devices SET device_status = 'offline' WHERE last_seen < ?", [
           staleThreshold
         ]);
 
@@ -75,10 +77,32 @@ export function setupWebSocketServer(httpServer: HttpServer) {
           });
         }
       }
+
+      // 2. Mark devices with no heartbeat for 45s-90s as reconnecting
+      const reconnectingDevices = await query(`
+        SELECT id, user_id, device_name FROM devices WHERE device_status = 'online' AND last_seen < ? AND last_seen >= ?
+      `, [reconnectingThreshold, staleThreshold]);
+
+      if (reconnectingDevices.length > 0) {
+        await execute("UPDATE devices SET device_status = 'reconnecting' WHERE device_status = 'online' AND last_seen < ? AND last_seen >= ?", [
+          reconnectingThreshold,
+          staleThreshold
+        ]);
+
+        for (const dev of reconnectingDevices) {
+          notifyUserDashboard(dev.user_id, {
+            type: 'device:status-change',
+            deviceId: dev.id,
+            onlineStatus: false,
+            deviceStatus: 'reconnecting',
+            lastSeen: now
+          });
+        }
+      }
     } catch (e) {
       console.error('Error sweeping stale devices:', e);
     }
-  }, 10000);
+  }, 15000);
 }
 
 function handleDashboardConnection(ws: WebSocket, queryParams: any) {
@@ -232,14 +256,20 @@ async function handleAgentConnection(ws: WebSocket, queryParams: any) {
   ws.on('close', async () => {
     connectedAgents.delete(deviceId);
     const closedNow = Date.now();
-    await execute("UPDATE devices SET device_status = 'offline', last_seen = ? WHERE id = ?", [closedNow, deviceId]);
+
+    // Check device's most recent heartbeat to prevent premature offline marking during brief socket drops
+    const dev = await queryOne('SELECT last_seen, user_id FROM devices WHERE id = ?', [deviceId]);
+    const elapsed = dev ? closedNow - Number(dev.last_seen) : 999999;
+    const newStatus = elapsed < 90000 ? 'reconnecting' : 'offline';
+
+    await execute("UPDATE devices SET device_status = ? WHERE id = ?", [newStatus, deviceId]);
 
     notifyUserDashboard(device.user_id, {
       type: 'device:status-change',
       deviceId,
-      onlineStatus: false,
-      deviceStatus: 'offline',
-      lastSeen: closedNow
+      onlineStatus: newStatus === 'online',
+      deviceStatus: newStatus,
+      lastSeen: dev ? Number(dev.last_seen) : closedNow
     });
 
     for (const [sessId, session] of activeSessions.entries()) {

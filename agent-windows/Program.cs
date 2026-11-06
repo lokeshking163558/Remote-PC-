@@ -1,31 +1,59 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
 namespace RemoteHub.Agent
 {
     internal static class Program
     {
-        private const string StartupRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string AppName = "RemoteHubAgent";
-
         private static Mutex? _mutex;
         private static NotifyIcon? _trayIcon;
         private static AgentConfig? _config;
         private static AgentNetworkClient? _networkClient;
-        private static SetupWizardForm? _setupForm;
+        private static AgentMainWindow? _mainWindow;
         private static FloatingSessionBanner? _banner;
 
         [STAThread]
         static void Main(string[] args)
         {
-            // Enforce single instance
+            // Handle installation / uninstallation CLI commands
+            if (args.Any(a => a.Equals("--install", StringComparison.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    InstallerService.Install(true, true);
+                    MessageBox.Show("RemoteHub Agent has been successfully installed.\nIt is now available in your Start Menu and Windows Installed Apps.", "RemoteHub Setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Installation failed: {ex.Message}", "RemoteHub Setup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                return;
+            }
+
+            if (args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)))
+            {
+                try
+                {
+                    InstallerService.Uninstall();
+                    MessageBox.Show("RemoteHub Agent has been successfully uninstalled from this computer.", "RemoteHub Uninstaller", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Uninstallation error: {ex.Message}", "RemoteHub Uninstaller", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                return;
+            }
+
+            // Enforce single instance per desktop session
             _mutex = new Mutex(true, "RemoteHubAgent_SingleInstance_Mutex", out bool createdNew);
             if (!createdNew)
             {
-                MessageBox.Show("RemoteHub Desktop Agent is already running in the background.", "RemoteHub Agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("RemoteHub Desktop Agent is already running in your system tray.", "RemoteHub Agent", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -33,34 +61,36 @@ namespace RemoteHub.Agent
 
             _config = AgentConfig.Load();
             _banner = new FloatingSessionBanner();
-            _setupForm = new SetupWizardForm(_config);
             _networkClient = new AgentNetworkClient(_config, _banner);
+            _mainWindow = new AgentMainWindow(_config, _networkClient);
 
-            _networkClient.ConnectionStatusChanged += isOnline =>
+            _networkClient.StateChanged += (state, reason) =>
             {
                 if (_trayIcon != null)
                 {
-                    _trayIcon.Text = isOnline
-                        ? $"RemoteHub Agent - Connected ({_config.DeviceName})"
-                        : "RemoteHub Agent - Disconnected";
+                    string statusText = state switch
+                    {
+                        AgentConnectionState.Online => $"RemoteHub: Connected ({_config.DeviceName})",
+                        AgentConnectionState.Reconnecting => "RemoteHub: Reconnecting...",
+                        AgentConnectionState.Connecting => "RemoteHub: Connecting...",
+                        _ => "RemoteHub: Disconnected"
+                    };
+                    _trayIcon.Text = statusText.Length > 63 ? statusText.Substring(0, 63) : statusText;
                 }
             };
 
-            _setupForm.SuccessfullyPaired += (s, e) =>
-            {
-                _networkClient.Start();
-            };
-
-            // Setup System Tray Icon
             SetupSystemTray();
 
-            if (_config.IsConfigured)
+            // Auto-start network services
+            _networkClient.Start();
+
+            // Check if launched with --minimized (e.g. from Windows Startup)
+            bool startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase)) || _config.LaunchMinimized;
+
+            if (!startMinimized || !_config.IsConfigured)
             {
-                _networkClient.Start();
-            }
-            else
-            {
-                _setupForm.Show();
+                _mainWindow.Show();
+                _mainWindow.BringToFront();
             }
 
             Application.Run();
@@ -70,31 +100,52 @@ namespace RemoteHub.Agent
         {
             var menu = new ContextMenuStrip();
 
-            var statusItem = new ToolStripMenuItem("RemoteHub Agent: Starting...") { Enabled = false };
-            var openSetupItem = new ToolStripMenuItem("Setup & Pairing...", null, (s, e) =>
+            var openItem = new ToolStripMenuItem("Open RemoteHub", null, (s, e) =>
             {
-                if (_setupForm == null || _setupForm.IsDisposed)
+                if (_mainWindow == null || _mainWindow.IsDisposed)
                 {
-                    _setupForm = new SetupWizardForm(_config!);
-                    _setupForm.SuccessfullyPaired += (sender, args) => _networkClient?.Start();
+                    _mainWindow = new AgentMainWindow(_config!, _networkClient!);
                 }
-                _setupForm.Show();
-                _setupForm.BringToFront();
-            });
+                _mainWindow.Show();
+                _mainWindow.WindowState = FormWindowState.Normal;
+                _mainWindow.BringToFront();
+            }) { Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
 
-            var startupItem = new ToolStripMenuItem("Start with Windows") { Checked = IsRunOnStartupEnabled() };
+            var statusItem = new ToolStripMenuItem("Status: Initializing...") { Enabled = false };
+
+            _networkClient!.StateChanged += (state, reason) =>
+            {
+                statusItem.Text = state switch
+                {
+                    AgentConnectionState.Online => "Status: 🟢 Connected & Ready",
+                    AgentConnectionState.Reconnecting => "Status: 🟡 Reconnecting...",
+                    AgentConnectionState.Connecting => "Status: 🔵 Connecting...",
+                    _ => "Status: ⚪ Disconnected"
+                };
+            };
+
+            var startupItem = new ToolStripMenuItem("Start with Windows") { Checked = InstallerService.IsAutoStartEnabled() };
             startupItem.Click += (s, e) =>
             {
                 bool newState = !startupItem.Checked;
-                SetRunOnStartup(newState);
-                startupItem.Checked = IsRunOnStartupEnabled();
+                InstallerService.SetAutoStart(newState);
+                _config!.AutoStart = newState;
+                _config.Save();
+                startupItem.Checked = InstallerService.IsAutoStartEnabled();
+            };
+
+            var pauseItem = new ToolStripMenuItem("Pause Remote Access") { Checked = _config!.PauseRemoteAccess };
+            pauseItem.Click += (s, e) =>
+            {
+                _config.PauseRemoteAccess = !_config.PauseRemoteAccess;
+                _config.Save();
+                pauseItem.Checked = _config.PauseRemoteAccess;
+                _networkClient?.AddLog($"Remote access paused: {_config.PauseRemoteAccess}");
             };
 
             var emergencyItem = new ToolStripMenuItem("Emergency Disconnect", null, (s, e) =>
             {
-                _banner?.HideSession();
-                _networkClient?.Stop();
-                _networkClient?.Start();
+                _networkClient?.HandleEmergencyDisconnect();
             });
 
             var exitItem = new ToolStripMenuItem("Exit Agent", null, (s, e) =>
@@ -104,15 +155,16 @@ namespace RemoteHub.Agent
                 Application.Exit();
             });
 
+            menu.Items.Add(openItem);
             menu.Items.Add(statusItem);
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(openSetupItem);
             menu.Items.Add(startupItem);
+            menu.Items.Add(pauseItem);
             menu.Items.Add(emergencyItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
 
-            // Generate a clean program icon
+            // Generate high-DPI system tray icon
             Icon icon = SystemIcons.Shield;
             try
             {
@@ -133,41 +185,7 @@ namespace RemoteHub.Agent
                 Visible = true
             };
 
-            _trayIcon.DoubleClick += (s, e) => openSetupItem.PerformClick();
-        }
-
-        private static bool IsRunOnStartupEnabled()
-        {
-            try
-            {
-                using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, false);
-                return key?.GetValue(AppName) != null;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static void SetRunOnStartup(bool enable)
-        {
-            try
-            {
-                using var key = Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
-                if (key != null)
-                {
-                    if (enable)
-                    {
-                        var exePath = Environment.ProcessPath ?? Application.ExecutablePath;
-                        key.SetValue(AppName, $"\"{exePath}\"");
-                    }
-                    else
-                    {
-                        key.DeleteValue(AppName, false);
-                    }
-                }
-            }
-            catch {}
+            _trayIcon.DoubleClick += (s, e) => openItem.PerformClick();
         }
     }
 }

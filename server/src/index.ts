@@ -97,7 +97,7 @@ app.get('/api/downloads/info', (req, res) => {
   res.json({
     version: '1.0.0',
     platform: 'Windows 10 / Windows 11 (x64)',
-    sha256: 'DF1866C25FF30D01EF5717CCB93F3DA2179EFF6D36C46852656D11987148A83E',
+    sha256: '5E04107E7743ABC32B50434B32E6B6C398E2DD59B2650BDB1EDB5A8899EC5B7D',
     filename: 'RemoteHubAgent.exe',
     downloadUrl: '/api/downloads/windows-agent',
     directGithubUrl: DIRECT_GITHUB_AGENT_EXE,
