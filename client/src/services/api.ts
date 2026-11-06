@@ -29,10 +29,10 @@ export function getWsBaseUrl(): string {
 }
 
 export const GITHUB_LATEST_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/latest/download/RemoteHubAgent.exe';
-export const DIRECT_GITHUB_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/latest/download/RemoteHubAgent.exe';
+export const DIRECT_GITHUB_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.1/RemoteHubAgent.exe';
 export const DIRECT_GITHUB_AGENT_TXT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/windows-agent.txt';
 export const GITHUB_RELEASES_PAGE_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases';
-export const GITHUB_TAG_RELEASE_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.0/RemoteHubAgent.exe';
+export const GITHUB_TAG_RELEASE_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.1/RemoteHubAgent.exe';
 
 export function getAgentDownloadUrl(): string {
   const backend = getBackendUrl();
