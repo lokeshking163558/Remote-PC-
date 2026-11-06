@@ -500,6 +500,7 @@ namespace RemoteHub.Agent
             string accountName = req.TryGetProperty("accountName", out var an) ? an.GetString() ?? "" : "";
             string accountEmail = req.TryGetProperty("accountEmail", out var ae) ? ae.GetString() ?? "" : "";
             string userAgent = req.TryGetProperty("userAgent", out var ua) ? ua.GetString() ?? "" : "";
+            string approvalStatus = req.TryGetProperty("approvalStatus", out var asProp) ? asProp.GetString() ?? "pending" : "pending";
             long expiresAt = req.TryGetProperty("expiresAt", out var exp) ? exp.GetInt64() : 0;
 
             if (expiresAt > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= expiresAt)
@@ -512,6 +513,16 @@ namespace RemoteHub.Agent
             {
                 AddLog($"Declined connection from {clientIp} (Remote Access is paused by host user)");
                 _ = SendSignalAsync(sessionId, "session-rejected", new { reason = "Host computer has temporarily paused remote access." });
+                return;
+            }
+
+            // If session was pre-authorized (e.g. Trusted 1-Click Access mode or PIN pre-verified), start streaming immediately without desktop prompt!
+            if (approvalStatus == "approved")
+            {
+                AddLog($"Remote session {sessionId.Substring(0, Math.Min(8, sessionId.Length))} pre-authorized. Starting desktop capture stream...");
+                _activeSessionId = sessionId;
+                _banner.ShowSession(clientIp);
+                StartSessionStreaming(sessionId);
                 return;
             }
 
@@ -790,11 +801,18 @@ namespace RemoteHub.Agent
                         await _ws.SendAsync(new ArraySegment<byte>(jpegBytes), WebSocketMessageType.Binary, true, ct);
                     }
 
-                    // 3. HTTP Frame Relay fallback (posts frame every ~100ms so browser has zero black-screen lag)
-                    httpPostSkipCounter++;
-                    if (httpPostSkipCounter % 3 == 0)
+                    // 3. HTTP Frame Relay fallback (guarantees continuous live stream even when WebSockets are unavailable on serverless)
+                    if (_webRtc == null || !_webRtc.IsDataChannelOpen)
                     {
                         _ = PostFrameToHttpRelayAsync(sessionId, jpegBytes);
+                    }
+                    else
+                    {
+                        httpPostSkipCounter++;
+                        if (httpPostSkipCounter % 10 == 0)
+                        {
+                            _ = PostFrameToHttpRelayAsync(sessionId, jpegBytes);
+                        }
                     }
 
                     await Task.Delay(delayMs, ct);

@@ -49,6 +49,7 @@ export const App: React.FC = () => {
     sessionToken: string;
     deviceId: string;
     deviceName: string;
+    approvalRequired?: boolean;
   } | null>(null);
 
   const handleConnectDevice = async (device: any) => {
@@ -65,7 +66,8 @@ export const App: React.FC = () => {
           sessionId: res.sessionId,
           sessionToken: res.sessionToken,
           deviceId: device.id,
-          deviceName: device.deviceName
+          deviceName: device.deviceName,
+          approvalRequired: res.approvalRequired ?? true
         });
       } catch (err: any) {
         console.error('[Connect] Approval session request error:', err);
@@ -91,7 +93,8 @@ export const App: React.FC = () => {
           sessionId: res.sessionId,
           sessionToken: res.sessionToken,
           deviceId: device.id,
-          deviceName: device.deviceName
+          deviceName: device.deviceName,
+          approvalRequired: false
         });
       } catch (err: any) {
         setConnectError(err.message || `Unable to connect to ${device.deviceName}`);
@@ -237,6 +240,7 @@ export const App: React.FC = () => {
         sessionToken={activeSession.sessionToken}
         deviceId={activeSession.deviceId}
         deviceName={activeSession.deviceName}
+        approvalRequired={activeSession.approvalRequired}
         onDisconnect={() => setActiveSession(null)}
       />
     );

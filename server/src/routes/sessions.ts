@@ -302,13 +302,15 @@ sessionsRouter.post('/:id/frame', (req, res) => {
 
     if (Buffer.isBuffer(req.body)) {
       buffer = req.body;
+    } else if (typeof req.body === 'string') {
+      buffer = Buffer.from(req.body, 'base64');
     } else if (req.body && req.body.frame) {
       buffer = Buffer.from(req.body.frame, 'base64');
     }
 
     if (buffer && buffer.length > 0) {
       storeSessionFrame(sessionId, buffer);
-      return res.json({ success: true });
+      return res.json({ success: true, timestamp: Date.now() });
     }
 
     return res.status(400).json({ error: 'Empty frame buffer' });
@@ -319,10 +321,10 @@ sessionsRouter.post('/:id/frame', (req, res) => {
 });
 
 // 11. GET /api/sessions/:id/frame (Fetch latest frame fallback for Browser)
-sessionsRouter.get('/:id/frame', (req, res) => {
+sessionsRouter.get('/:id/frame', async (req, res) => {
   try {
     const sessionId = req.params.id;
-    const frame = getSessionFrame(sessionId);
+    const frame = await getSessionFrame(sessionId);
 
     if (!frame) {
       return res.status(204).end();

@@ -41,6 +41,8 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'Cache-Control', 'Pragma']
 }));
 
+// Support raw binary image payloads for high-speed JPEG frame streaming
+app.use(express.raw({ type: ['image/*', 'application/octet-stream'], limit: '20mb' }));
 app.use(express.json({ limit: '10mb' }));
 
 // Lightweight cookie parsing middleware

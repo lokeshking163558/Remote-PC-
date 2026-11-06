@@ -38,6 +38,7 @@ interface RemoteDesktopStudioProps {
   sessionToken: string;
   deviceId: string;
   deviceName: string;
+  approvalRequired?: boolean;
   onDisconnect: () => void;
 }
 
@@ -46,6 +47,7 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
   sessionToken,
   deviceId,
   deviceName,
+  approvalRequired = false,
   onDisconnect
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -58,9 +60,13 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
   const hasRemoteDescriptionRef = useRef(false);
 
   // Connection & Session State Management
-  const [sessionStatus, setSessionStatus] = useState<RemoteSessionStatus>('authorizing');
-  const [statusMessage, setStatusMessage] = useState('Waiting for laptop user approval...');
-  const [isAwaitingApproval, setIsAwaitingApproval] = useState(true);
+  const [sessionStatus, setSessionStatus] = useState<RemoteSessionStatus>(
+    approvalRequired ? 'authorizing' : 'connecting'
+  );
+  const [statusMessage, setStatusMessage] = useState(
+    approvalRequired ? `Waiting for laptop user approval on ${deviceName}...` : `Connecting to ${deviceName}...`
+  );
+  const [isAwaitingApproval, setIsAwaitingApproval] = useState(approvalRequired);
   const [approvalCountdown, setApprovalCountdown] = useState(45);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -437,6 +443,11 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
     };
     pollSignals();
 
+    // Auto-initialize WebRTC if already approved (e.g. 1-Click Trusted Mode or pre-verified PIN)
+    if (!approvalRequired) {
+      initWebRtcConnection();
+    }
+
     // 3. Fallback Frame Polling Loop (Polls frames directly via HTTP while WebRTC connects)
     const pollFrameRelay = async () => {
       if (isCancelled) return;
@@ -455,10 +466,10 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
       }
 
       if (!isCancelled) {
-        framePollInterval = setTimeout(pollFrameRelay, isStreamingRef.current ? 500 : 150);
+        framePollInterval = setTimeout(pollFrameRelay, isStreamingRef.current ? 500 : 100);
       }
     };
-    framePollInterval = setTimeout(pollFrameRelay, 1200);
+    framePollInterval = setTimeout(pollFrameRelay, 50);
 
     // 4. Inbound Signal Processor
     const handleIncomingSignalingMessage = async (msg: any) => {

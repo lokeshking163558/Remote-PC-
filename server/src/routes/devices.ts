@@ -640,7 +640,7 @@ devicesRouter.get('/:id/agent-poll', async (req, res) => {
     const now = Date.now();
     await execute("UPDATE devices SET device_status = 'online', last_seen = ? WHERE id = ?", [now, deviceId]);
 
-    const pendingSession = getDevicePendingRequest(deviceId);
+    const pendingSession = await getDevicePendingRequest(deviceId);
     return res.json({
       success: true,
       timestamp: now,

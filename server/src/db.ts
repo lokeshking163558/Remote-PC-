@@ -200,6 +200,21 @@ export async function initDatabase(): Promise<void> {
         updated_at BIGINT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS session_signals (
+        id VARCHAR(64) PRIMARY KEY,
+        session_id VARCHAR(64) NOT NULL,
+        sender VARCHAR(20) NOT NULL,
+        data TEXT NOT NULL,
+        timestamp BIGINT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_frames (
+        session_id VARCHAR(64) PRIMARY KEY,
+        frame_data TEXT NOT NULL,
+        timestamp BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_signals_session ON session_signals(session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
       CREATE INDEX IF NOT EXISTS idx_devices_installation ON devices(installation_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON remote_sessions(user_id);
@@ -310,6 +325,21 @@ export async function initDatabase(): Promise<void> {
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS session_signals (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        data TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_frames (
+        session_id TEXT PRIMARY KEY,
+        frame_data TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_signals_session ON session_signals (session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices (user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON remote_sessions (user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_device_id ON remote_sessions (device_id);

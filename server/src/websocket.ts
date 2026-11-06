@@ -502,6 +502,12 @@ export function queueSessionSignal(sessionId: string, sender: 'client' | 'agent'
     queue.splice(0, queue.length - 200);
   }
 
+  // Persist to database for cross-instance serverless signaling
+  execute(
+    'INSERT INTO session_signals (id, session_id, sender, data, timestamp) VALUES (?, ?, ?, ?, ?)',
+    [signalItem.id, sessionId, sender, JSON.stringify(data), signalItem.timestamp]
+  ).catch(() => {});
+
   // Wake up any long-polling listeners
   const waiters = signalWaiters.get(sessionId);
   if (waiters) {
@@ -535,13 +541,35 @@ export function queueSessionSignal(sessionId: string, sender: 'client' | 'agent'
   }
 }
 
-export function pollSessionSignals(sessionId: string, receiver: 'client' | 'agent', since: number, timeoutMs = 3500): Promise<QueuedSignal[]> {
-  const queue = sessionSignalQueues.get(sessionId) || [];
+export async function pollSessionSignals(sessionId: string, receiver: 'client' | 'agent', since: number, timeoutMs = 3500): Promise<QueuedSignal[]> {
   const targetSender = receiver === 'client' ? 'agent' : 'client';
-  const newSignals = queue.filter(s => s.sender === targetSender && s.timestamp > since);
 
-  if (newSignals.length > 0 || timeoutMs <= 0) {
-    return Promise.resolve(newSignals);
+  // 1. Check in-memory queue first
+  const queue = sessionSignalQueues.get(sessionId) || [];
+  const memorySignals = queue.filter(s => s.sender === targetSender && s.timestamp > since);
+  if (memorySignals.length > 0) {
+    return memorySignals;
+  }
+
+  // 2. Query database for signals dispatched by another serverless container instance
+  try {
+    const dbSignals = await query(
+      'SELECT id, sender, data, timestamp FROM session_signals WHERE session_id = ? AND sender = ? AND timestamp > ? ORDER BY timestamp ASC',
+      [sessionId, targetSender, since]
+    );
+
+    if (dbSignals && dbSignals.length > 0) {
+      return dbSignals.map(row => ({
+        id: row.id,
+        sender: row.sender,
+        timestamp: Number(row.timestamp),
+        data: typeof row.data === 'string' ? JSON.parse(row.data) : row.data
+      }));
+    }
+  } catch {}
+
+  if (timeoutMs <= 0) {
+    return [];
   }
 
   return new Promise<QueuedSignal[]>((resolve) => {
@@ -583,8 +611,47 @@ export function setDevicePendingRequest(deviceId: string, request: any) {
   }
 }
 
-export function getDevicePendingRequest(deviceId: string) {
-  return devicePendingRequests.get(deviceId) || null;
+export async function getDevicePendingRequest(deviceId: string): Promise<any> {
+  const inMemory = devicePendingRequests.get(deviceId);
+  if (inMemory && (!inMemory.expiresAt || inMemory.expiresAt > Date.now())) {
+    return inMemory;
+  }
+
+  // Fallback: Query remote_sessions table from database (survives across serverless containers!)
+  try {
+    const now = Date.now();
+    const activeThreshold = now - 60000; // within last 60 seconds
+    const dbRow = await queryOne(`
+      SELECT s.id AS sessionId, s.session_token AS sessionToken, s.device_id AS deviceId,
+             s.user_id AS userId, s.client_ip AS clientIp, s.approval_status AS approvalStatus,
+             s.created_at AS createdAt, u.name AS accountName, u.email AS accountEmail,
+             d.device_name AS deviceName
+      FROM remote_sessions s
+      LEFT JOIN users u ON s.user_id = u.id
+      LEFT JOIN devices d ON s.device_id = d.id
+      WHERE s.device_id = ? AND s.approval_status IN ('pending', 'approved')
+        AND s.session_status IN ('pending_approval', 'authorized', 'active')
+        AND s.created_at > ?
+      ORDER BY s.created_at DESC LIMIT 1
+    `, [deviceId, activeThreshold]);
+
+    if (dbRow) {
+      return {
+        sessionId: dbRow.sessionId,
+        sessionToken: dbRow.sessionToken,
+        deviceId: dbRow.deviceId,
+        deviceName: dbRow.deviceName || 'LOKI',
+        userId: dbRow.userId,
+        accountName: dbRow.accountName || dbRow.accountEmail || 'Authorized User',
+        accountEmail: dbRow.accountEmail || '',
+        clientIp: dbRow.clientIp || 'Web Browser',
+        createdAt: Number(dbRow.createdAt),
+        approvalStatus: dbRow.approvalStatus || 'pending'
+      };
+    }
+  } catch {}
+
+  return null;
 }
 
 export function clearDevicePendingRequest(deviceId: string, sessionId?: string) {
@@ -597,6 +664,17 @@ export function clearDevicePendingRequest(deviceId: string, sessionId?: string) 
 export function storeSessionFrame(sessionId: string, buffer: Buffer) {
   latestSessionFrames.set(sessionId, { buffer, timestamp: Date.now() });
 
+  // Store in database / shared store for multi-container retrieval
+  try {
+    const base64 = buffer.toString('base64');
+    execute(
+      isPostgres
+        ? 'INSERT INTO session_frames (session_id, frame_data, timestamp) VALUES ($1, $2, $3) ON CONFLICT (session_id) DO UPDATE SET frame_data = $2, timestamp = $3'
+        : 'INSERT OR REPLACE INTO session_frames (session_id, frame_data, timestamp) VALUES (?, ?, ?)',
+      [sessionId, base64, Date.now()]
+    ).catch(() => {});
+  } catch {}
+
   // Also deliver to client WebSocket if open
   const session = activeSessions.get(sessionId);
   if (session && session.clientWs && session.clientWs.readyState === WebSocket.OPEN) {
@@ -604,11 +682,24 @@ export function storeSessionFrame(sessionId: string, buffer: Buffer) {
   }
 }
 
-export function getSessionFrame(sessionId: string): Buffer | null {
+export async function getSessionFrame(sessionId: string): Promise<Buffer | null> {
   const item = latestSessionFrames.get(sessionId);
-  if (!item) return null;
-  if (Date.now() - item.timestamp < 6000) {
+  if (item && Date.now() - item.timestamp < 6000) {
     return item.buffer;
   }
+
+  // Cross-container DB fallback
+  try {
+    const row = await queryOne(
+      'SELECT frame_data, timestamp FROM session_frames WHERE session_id = ? AND timestamp > ?',
+      [sessionId, Date.now() - 6000]
+    );
+    if (row && row.frame_data) {
+      const buf = Buffer.from(row.frame_data, 'base64');
+      latestSessionFrames.set(sessionId, { buffer: buf, timestamp: Number(row.timestamp) });
+      return buf;
+    }
+  } catch {}
+
   return null;
 }
