@@ -1,5 +1,14 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { api, getAuthToken, getRefreshToken, clearAuthTokens } from '../services/api';
+import {
+  api,
+  getAuthToken,
+  getRefreshToken,
+  clearAuthTokens,
+  testBackendHealth,
+  resetBackendUrl,
+  getBackendUrl,
+  DEFAULT_BACKEND_URL
+} from '../services/api';
 
 export type AuthState = 'loading' | 'authenticated' | 'unauthenticated' | 'session_expired' | 'network_unavailable';
 
@@ -25,6 +34,8 @@ interface AuthContextType {
   logoutAll: () => Promise<void>;
   refreshUser: () => Promise<void>;
   retrySession: () => Promise<void>;
+  resetSessionAndSignIn: () => void;
+  resetServerToDefault: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -58,8 +69,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err: any) {
       console.warn('[Auth] Session restoration check returned error:', err);
 
-      // Distinguish explicit authentication rejection from temporary network/server issues
-      if (err.status === 401 || err.message?.includes('401') || err.message?.includes('expired') || err.message?.includes('invalid')) {
+      // Check for explicit authentication rejection
+      const isAuthError =
+        err.status === 401 ||
+        err.status === 403 ||
+        err.message?.includes('401') ||
+        err.message?.includes('403') ||
+        err.message?.includes('expired') ||
+        err.message?.includes('invalid') ||
+        err.message?.includes('Authentication required');
+
+      if (isAuthError) {
         // Attempt one silent refresh if a refresh token exists
         try {
           const newToken = await api.refreshToken();
@@ -77,22 +97,72 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         clearAuthTokens();
         setUser(null);
         setToken(null);
-        setAuthState('session_expired');
+        setAuthState('unauthenticated');
         setErrorMessage('Your session has expired. Please sign in again.');
-      } else {
-        // Network unavailable, offline, or transient server 5xx
-        // Never log out the user due to a temporary network interruption!
-        console.warn('[Auth] Network or server temporary issue during restore; preserving user state if present');
-        if (storedToken) {
-          // If we had a token, treat as network_unavailable or optimistic authenticated
-          setAuthState('network_unavailable');
-          setErrorMessage('Unable to connect to the authentication server. Please check your connection.');
-        } else {
+        return;
+      }
+
+      // If getMe failed with a network or server error, test backend health
+      try {
+        const health = await testBackendHealth();
+        if (health.ok) {
+          // The server is healthy and responding! Therefore the failure was an unrecognized auth error
+          console.warn('[Auth] Server is healthy but session restoration failed. Redirecting to login.');
+          clearAuthTokens();
+          setUser(null);
+          setToken(null);
           setAuthState('unauthenticated');
+          setErrorMessage('Session expired or invalidated. Please sign in.');
+          return;
         }
+
+        // Target server failed health probe. If target was a custom URL, test official production gateway
+        if (health.target !== DEFAULT_BACKEND_URL) {
+          console.warn('[Auth] Custom server unreachable. Testing official gateway:', DEFAULT_BACKEND_URL);
+          const prodHealth = await testBackendHealth(DEFAULT_BACKEND_URL);
+          if (prodHealth.ok) {
+            console.info('[Auth] Production gateway is healthy! Auto-resetting backend URL...');
+            resetBackendUrl();
+            try {
+              const res = await api.getMe();
+              setUser(res.user);
+              setToken(getAuthToken());
+              setAuthState('authenticated');
+              return;
+            } catch {
+              clearAuthTokens();
+              setUser(null);
+              setToken(null);
+              setAuthState('unauthenticated');
+              return;
+            }
+          }
+        }
+
+        // Both endpoints failed or network truly offline
+        setAuthState('network_unavailable');
+        setErrorMessage(
+          `Unable to reach authentication server (${getBackendUrl()}). ${health.error || 'Please check your connection.'}`
+        );
+      } catch (healthErr: any) {
+        setAuthState('network_unavailable');
+        setErrorMessage(`Unable to connect to authentication server. ${healthErr.message || ''}`);
       }
     }
   }, []);
+
+  const resetSessionAndSignIn = useCallback(() => {
+    clearAuthTokens();
+    setUser(null);
+    setToken(null);
+    setAuthState('unauthenticated');
+    setErrorMessage(null);
+  }, []);
+
+  const resetServerToDefault = useCallback(async () => {
+    resetBackendUrl();
+    await restoreSession();
+  }, [restoreSession]);
 
   useEffect(() => {
     restoreSession();
@@ -180,7 +250,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         logoutAll,
         refreshUser,
-        retrySession: restoreSession
+        retrySession: restoreSession,
+        resetSessionAndSignIn,
+        resetServerToDefault
       }}
     >
       {children}

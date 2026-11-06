@@ -46,10 +46,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
-          tag_name: ${{ github.ref_name || 'v1.2.0' }}
-          name: RemoteHub Agent ${{ github.ref_name || 'v1.2.0' }}
+          tag_name: ${{ github.ref_name || 'v1.3.2' }}
+          name: RemoteHub Agent ${{ github.ref_name || 'v1.3.2' }}
           draft: false
           prerelease: false
+          make_latest: true
           files: |
             release-dist/RemoteHubAgent.exe
             windows-agent.txt

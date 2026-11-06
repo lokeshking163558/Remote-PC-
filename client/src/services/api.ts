@@ -1,6 +1,8 @@
 // RemoteHub Client API Service
 // Production Gateway: https://remote-pc-server.vercel.app
 
+export const DEFAULT_BACKEND_URL = 'https://remote-pc-server.vercel.app';
+
 export function getBackendUrl(): string {
   const envUrl = (import.meta as any).env?.VITE_API_URL;
   if (envUrl && typeof envUrl === 'string' && envUrl.trim()) {
@@ -9,14 +11,53 @@ export function getBackendUrl(): string {
 
   const stored = localStorage.getItem('remotehub_backend_url');
   if (stored && stored.trim()) {
-    return stored.trim().replace(/\/$/, '');
+    const trimmed = stored.trim().replace(/\/$/, '');
+    // Safety auto-healing: Insecure http:// or localhost will be blocked by browsers on HTTPS pages (Mixed Content)
+    if (typeof window !== 'undefined' && window.location.protocol === 'https:' && trimmed.startsWith('http://')) {
+      console.warn('[API] Insecure HTTP backend URL discarded on HTTPS page to prevent Mixed Content errors:', trimmed);
+      localStorage.removeItem('remotehub_backend_url');
+    } else {
+      return trimmed;
+    }
   }
 
-  if (window.location.hostname.includes('remote-pc-green.vercel.app') || window.location.hostname.includes('vercel.app')) {
-    return 'https://remote-pc-server.vercel.app';
+  if (typeof window !== 'undefined' && (window.location.hostname.includes('remote-pc-green.vercel.app') || window.location.hostname.includes('vercel.app'))) {
+    return DEFAULT_BACKEND_URL;
   }
 
-  return 'https://remote-pc-server.vercel.app';
+  return DEFAULT_BACKEND_URL;
+}
+
+export function resetBackendUrl(): string {
+  localStorage.removeItem('remotehub_backend_url');
+  return DEFAULT_BACKEND_URL;
+}
+
+export async function testBackendHealth(customUrl?: string): Promise<{
+  ok: boolean;
+  target: string;
+  latency: number;
+  status?: string;
+  error?: string;
+}> {
+  const target = customUrl ? customUrl.trim().replace(/\/$/, '') : getBackendUrl();
+  const startTime = Date.now();
+  try {
+    const res = await fetch(`${target}/api/health`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(6000)
+    });
+    const latency = Date.now() - startTime;
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { ok: true, target, latency, status: data.status || 'ok' };
+    }
+    return { ok: false, target, latency, error: `HTTP ${res.status} ${res.statusText}` };
+  } catch (err: any) {
+    const latency = Date.now() - startTime;
+    return { ok: false, target, latency, error: err.message || 'Connection refused or timeout' };
+  }
 }
 
 export function getWsBaseUrl(): string {
@@ -35,8 +76,8 @@ export const GITHUB_RELEASES_PAGE_URL = 'https://github.com/lokeshking163558/Rem
 export const GITHUB_TAG_RELEASE_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.2/RemoteHubAgent.exe';
 
 export function getAgentDownloadUrl(): string {
-  const backend = getBackendUrl();
-  return backend ? `${backend}/api/downloads/windows-agent` : DIRECT_GITHUB_AGENT_DOWNLOAD_URL;
+  // Directly point to the verified immutable release binary on GitHub CDN
+  return DIRECT_GITHUB_AGENT_DOWNLOAD_URL;
 }
 
 export function getAgentTxtDownloadUrl(): string {
@@ -89,7 +130,7 @@ let refreshPromise: Promise<string | null> | null = null;
 async function doRefreshToken(): Promise<string | null> {
   const rToken = getRefreshToken();
   try {
-    const res = await fetch(getApiEndpoint('/auth/refresh'), {
+    const res = await fetchWithFallback(getApiEndpoint('/auth/refresh'), '/api/auth/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -112,6 +153,26 @@ async function doRefreshToken(): Promise<string | null> {
   return null;
 }
 
+// Robust fetch helper with transparent fallback to same-origin rewritten path if cross-origin is blocked
+async function fetchWithFallback(primaryUrl: string, fallbackPath: string, options: RequestInit = {}): Promise<Response> {
+  try {
+    return await fetch(primaryUrl, options);
+  } catch (primaryErr: any) {
+    // If running on a domain that proxies /api (like Vercel rewrites), retry via same-origin
+    if (typeof window !== 'undefined' && primaryUrl.startsWith('http')) {
+      const origin = window.location.origin;
+      const relativeUrl = `${origin}${fallbackPath.startsWith('/') ? fallbackPath : `/${fallbackPath}`}`;
+      if (relativeUrl !== primaryUrl) {
+        console.warn(`[API] Cross-origin fetch to ${primaryUrl} failed; trying same-origin proxy ${relativeUrl}...`);
+        try {
+          return await fetch(relativeUrl, options);
+        } catch {}
+      }
+    }
+    throw primaryErr;
+  }
+}
+
 async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
   options.credentials = 'include';
   options.headers = {
@@ -119,7 +180,8 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
     ...(options.headers || {})
   };
 
-  let res = await fetch(url, options);
+  const cleanPath = url.includes('/api/') ? '/api/' + url.split('/api/')[1] : url;
+  let res = await fetchWithFallback(url, cleanPath, options);
 
   // If unauthorized and we have a refresh token, attempt silent token refresh once
   if (res.status === 401 && (getRefreshToken() || document.cookie.includes('remotehub_refresh_token'))) {
@@ -135,7 +197,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
         ...(options.headers || {}),
         Authorization: `Bearer ${newToken}`
       };
-      res = await fetch(url, options);
+      res = await fetchWithFallback(url, cleanPath, options);
     }
   }
 
@@ -156,7 +218,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
 export const api = {
   // Auth
   async register(data: { email: string; password: string; fullName: string }) {
-    const res = await fetch(getApiEndpoint('/auth/register'), {
+    const res = await fetchWithFallback(getApiEndpoint('/auth/register'), '/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -170,7 +232,7 @@ export const api = {
   },
 
   async login(data: { email: string; password: string; rememberMe?: boolean }) {
-    const res = await fetch(getApiEndpoint('/auth/login'), {
+    const res = await fetchWithFallback(getApiEndpoint('/auth/login'), '/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -184,7 +246,7 @@ export const api = {
   },
 
   async loginWithGoogle(credential: string) {
-    const res = await fetch(getApiEndpoint('/auth/google'), {
+    const res = await fetchWithFallback(getApiEndpoint('/auth/google'), '/api/auth/google', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -199,7 +261,7 @@ export const api = {
 
   async getAuthConfig() {
     try {
-      const res = await fetch(getApiEndpoint('/auth/config'));
+      const res = await fetchWithFallback(getApiEndpoint('/auth/config'), '/api/auth/config');
       return handleResponse<{ googleAuthEnabled: boolean; googleClientId: string | null }>(res);
     } catch {
       return { googleAuthEnabled: false, googleClientId: null };

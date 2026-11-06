@@ -173,3 +173,4 @@ export const PinSetupModal: React.FC<PinSetupModalProps> = ({
     </div>
   );
 };
+

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from './context/AuthContext';
-import { api } from './services/api';
+import { api, getBackendUrl, DIRECT_GITHUB_AGENT_DOWNLOAD_URL, testBackendHealth, DEFAULT_BACKEND_URL } from './services/api';
 import { Navbar } from './components/Navbar';
 import { LandingPage } from './components/LandingPage';
 import { DashboardPage } from './components/DashboardPage';
@@ -12,10 +12,18 @@ import { PinSetupModal } from './components/PinSetupModal';
 import { AddDeviceModal } from './components/AddDeviceModal';
 import { DeviceDetailsModal } from './components/DeviceDetailsModal';
 import { RemoteDesktopStudio } from './components/RemoteDesktopStudio';
-import { WifiOff, RefreshCw } from 'lucide-react';
+import { WifiOff, RefreshCw, LogIn, Server, RotateCcw, Activity, CheckCircle2, AlertTriangle, Download } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const { isAuthenticated, isLoading, authState, errorMessage, retrySession } = useAuth();
+  const {
+    isAuthenticated,
+    isLoading,
+    authState,
+    errorMessage,
+    retrySession,
+    resetSessionAndSignIn,
+    resetServerToDefault
+  } = useAuth();
 
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [showAddDevice, setShowAddDevice] = useState(false);
@@ -24,6 +32,16 @@ export const App: React.FC = () => {
   const [selectedDeviceForDetails, setSelectedDeviceForDetails] = useState<string | null>(null);
   const [connectingDeviceId, setConnectingDeviceId] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+
+  // Network screen state
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [diagResult, setDiagResult] = useState<{
+    tested: boolean;
+    ok?: boolean;
+    target?: string;
+    latency?: number;
+    error?: string;
+  } | null>(null);
 
   // Active Remote Session state
   const [activeSession, setActiveSession] = useState<{
@@ -94,25 +112,118 @@ export const App: React.FC = () => {
     );
   }
 
-  // Network unavailable screen with retry button (does not log the user out)
+  // Network unavailable screen with self-healing, clear-session, and diagnostic options
   if (authState === 'network_unavailable') {
+    const handleRunDiag = async () => {
+      setDiagResult({ tested: true, latency: undefined });
+      const res = await testBackendHealth();
+      setDiagResult({
+        tested: true,
+        ok: res.ok,
+        target: res.target,
+        latency: res.latency,
+        error: res.error
+      });
+    };
+
+    const handleRetry = async () => {
+      setIsRetrying(true);
+      try {
+        await retrySession();
+      } finally {
+        setIsRetrying(false);
+      }
+    };
+
     return (
-      <div className="min-h-screen bg-[#0a0d14] flex items-center justify-center px-4">
-        <div className="max-w-md w-full p-8 rounded-2xl bg-gray-900 border border-gray-800 text-center shadow-2xl">
-          <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto mb-4">
-            <WifiOff className="w-6 h-6" />
+      <div className="min-h-screen bg-[#0a0d14] flex items-center justify-center px-4 py-8">
+        <div className="max-w-md w-full p-6 sm:p-8 rounded-2xl bg-[#0e1424] border border-gray-800 text-center shadow-2xl relative overflow-hidden">
+          {/* Subtle top indicator bar */}
+          <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600" />
+
+          <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center mx-auto mb-4">
+            <WifiOff className="w-7 h-7" />
           </div>
-          <h2 className="text-lg font-bold text-white mb-2">Network Unavailable</h2>
-          <p className="text-xs text-gray-400 mb-6">
-            {errorMessage || 'Unable to connect to the RemoteHub server. Your session has been preserved.'}
+
+          <h2 className="text-xl font-bold text-white mb-1.5">Network Unavailable</h2>
+          <p className="text-xs text-gray-400 mb-5 leading-relaxed">
+            {errorMessage || 'Unable to connect to the authentication server. Your session is safely preserved.'}
           </p>
-          <button
-            onClick={() => retrySession()}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-all shadow-md shadow-blue-600/20"
-          >
-            <RefreshCw className="w-4 h-4" />
-            Retry Connection
-          </button>
+
+          <div className="mb-5 p-3 rounded-xl bg-gray-950/80 border border-gray-800 text-left font-mono text-[11px] text-gray-400 space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500">Gateway:</span>
+              <span className="text-blue-400 truncate max-w-[200px]">{getBackendUrl()}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500">Browser Online:</span>
+              <span className={navigator.onLine ? 'text-emerald-400' : 'text-rose-400'}>
+                {navigator.onLine ? 'Connected (Online)' : 'Offline'}
+              </span>
+            </div>
+            {diagResult?.tested && (
+              <div className="pt-1 mt-1 border-t border-gray-800/80">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-500">Health Probe:</span>
+                  <span className={diagResult.ok ? 'text-emerald-400' : 'text-rose-400'}>
+                    {diagResult.ok ? `OK (${diagResult.latency}ms)` : `Failed (${diagResult.error || 'No response'})`}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Action buttons */}
+          <div className="space-y-2.5">
+            <button
+              onClick={handleRetry}
+              disabled={isRetrying}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-xs transition-all shadow-md shadow-blue-600/20"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRetrying ? 'animate-spin' : ''}`} />
+              {isRetrying ? 'Verifying Gateway...' : 'Retry Connection'}
+            </button>
+
+            <button
+              onClick={resetSessionAndSignIn}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 font-semibold text-xs transition-colors border border-gray-700"
+            >
+              <LogIn className="w-4 h-4 text-gray-400" />
+              Sign In with Another Account
+            </button>
+
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                onClick={resetServerToDefault}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-gray-900 hover:bg-gray-800 text-gray-400 hover:text-gray-200 text-[11px] font-medium transition-colors border border-gray-800"
+                title="Reset backend endpoint to official production gateway"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset Server URL
+              </button>
+
+              <button
+                onClick={handleRunDiag}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-gray-900 hover:bg-gray-800 text-gray-400 hover:text-gray-200 text-[11px] font-medium transition-colors border border-gray-800"
+                title="Run real-time latency and connectivity diagnostics"
+              >
+                <Activity className="w-3.5 h-3.5 text-blue-400" />
+                Test Health
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-gray-800/80 flex items-center justify-between text-[11px] text-gray-500">
+            <span>Windows Desktop Agent:</span>
+            <a
+              href={DIRECT_GITHUB_AGENT_DOWNLOAD_URL}
+              download="RemoteHubAgent.exe"
+              className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 font-medium"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Direct CDN (173MB)
+            </a>
+          </div>
         </div>
       </div>
     );
@@ -156,7 +267,7 @@ export const App: React.FC = () => {
         onGetStarted={() => setCurrentView('register')}
         onLogin={() => setCurrentView('login')}
         onDownloadAgent={() => {
-          window.location.href = '/api/downloads/windows-agent';
+          window.location.href = DIRECT_GITHUB_AGENT_DOWNLOAD_URL;
         }}
       />
     );

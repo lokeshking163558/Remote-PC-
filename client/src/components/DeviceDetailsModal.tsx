@@ -126,11 +126,10 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({ deviceId
             <div className="flex items-center gap-2">
               <h3 className="text-xl font-bold text-white tracking-tight">{device.deviceName}</h3>
               <span
-                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                  device.onlineStatus
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    : 'bg-gray-800 text-gray-400 border border-gray-700'
-                }`}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold ${device.onlineStatus
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                  : 'bg-gray-800 text-gray-400 border border-gray-700'
+                  }`}
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${device.onlineStatus ? 'bg-emerald-400' : 'bg-gray-500'}`} />
                 {device.onlineStatus ? 'Online' : 'Offline'}
@@ -146,44 +145,40 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({ deviceId
         <div className="flex items-center gap-2 border-b border-gray-800 pb-3 mb-6">
           <button
             onClick={() => setActiveTab('metrics')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
-              activeTab === 'metrics'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${activeTab === 'metrics'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+              }`}
           >
             <Activity className="w-3.5 h-3.5" />
             Hardware Telemetry
           </button>
           <button
             onClick={() => setActiveTab('wake')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
-              activeTab === 'wake'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${activeTab === 'wake'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+              }`}
           >
             <Zap className="w-3.5 h-3.5" />
             Wake-on-LAN
           </button>
           <button
             onClick={() => setActiveTab('pin')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
-              activeTab === 'pin'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${activeTab === 'pin'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+              }`}
           >
             <KeyRound className="w-3.5 h-3.5" />
             Access Method & PIN
           </button>
           <button
             onClick={() => setActiveTab('history')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${
-              activeTab === 'history'
-                ? 'bg-blue-600 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-            }`}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 ${activeTab === 'history'
+              ? 'bg-blue-600 text-white'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+              }`}
           >
             <History className="w-3.5 h-3.5" />
             Session History
@@ -305,11 +300,10 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({ deviceId
 
             {wakeResult && (
               <div
-                className={`p-4 rounded-xl border text-xs ${
-                  wakeResult.success
-                    ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
-                    : 'bg-red-500/10 border-red-500/20 text-red-300'
-                }`}
+                className={`p-4 rounded-xl border text-xs ${wakeResult.success
+                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                  : 'bg-red-500/10 border-red-500/20 text-red-300'
+                  }`}
               >
                 <div className="font-semibold mb-1">
                   {wakeResult.success ? '✓ Magic Packet Dispatched' : '✗ Wake Request Notice'}
@@ -504,11 +498,10 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({ deviceId
                       </div>
                     </div>
                     <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                        s.status === 'active'
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                          : 'bg-gray-800 text-gray-400'
-                      }`}
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${s.status === 'active'
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                        : 'bg-gray-800 text-gray-400'
+                        }`}
                     >
                       {s.status}
                     </span>
