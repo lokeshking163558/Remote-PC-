@@ -41,7 +41,6 @@ namespace RemoteHub.Agent
         private Button _btnRename = null!;
 
         // Tab 3: Security
-        private TextBox _txtCurPin = null!;
         private TextBox _txtNewPin = null!;
         private Button _btnChangePin = null!;
         private CheckBox _chkPauseAccess = null!;
@@ -502,39 +501,43 @@ namespace RemoteHub.Agent
             };
             card.Controls.Add(_chkPauseAccess);
 
-            // Change PIN Section
-            card.Controls.Add(CreateHeaderLabel("Change Permanent Access PIN", 16, 94));
-            card.Controls.Add(CreateLabel("Current PIN:", 16, 124));
-            _txtCurPin = CreateTextBox("", 16, 146, 260);
-            _txtCurPin.PasswordChar = '●';
-            _txtCurPin.MaxLength = 8;
-            card.Controls.Add(_txtCurPin);
+            // Access Method & PIN Section
+            card.Controls.Add(CreateHeaderLabel("Access Method & Permanent PIN", 16, 94));
+            
+            var lblMethodInfo = new Label
+            {
+                Text = "● Active Mode: Ask for approval on laptop (Incoming connections prompt you to Allow / Deny).",
+                Location = new Point(16, 120),
+                Width = 538,
+                Height = 22,
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(52, 211, 153) // Emerald
+            };
+            card.Controls.Add(lblMethodInfo);
 
-            card.Controls.Add(CreateLabel("New PIN (6-8 Digits):", 294, 124));
-            _txtNewPin = CreateTextBox("", 294, 146, 260);
+            card.Controls.Add(CreateLabel("New Access PIN (6-8 Digits, Optional):", 16, 146));
+            _txtNewPin = CreateTextBox("", 16, 168, 260);
             _txtNewPin.PasswordChar = '●';
             _txtNewPin.MaxLength = 8;
             card.Controls.Add(_txtNewPin);
 
-            _btnChangePin = CreateButton("Update Access PIN", 16, 188, 538, 34);
+            _btnChangePin = CreateButton("Save / Reset PIN on This Laptop", 286, 168, 268, 32);
             _btnChangePin.Click += async (s, e) =>
             {
-                string cur = _txtCurPin.Text.Trim();
                 string nw = _txtNewPin.Text.Trim();
                 if (nw.Length < 6 || nw.Length > 8)
                 {
-                    _lblPinStatus.Text = "New PIN must be 6 to 8 digits.";
+                    _lblPinStatus.Text = "PIN must be 6 to 8 digits.";
                     _lblPinStatus.ForeColor = Color.FromArgb(248, 113, 113);
                     return;
                 }
                 _btnChangePin.Enabled = false;
-                var res = await _client.ChangePinAsync(cur, nw);
+                var res = await _client.ResetPinLocalAsync(nw);
                 _btnChangePin.Enabled = true;
                 _lblPinStatus.Text = res.Message;
                 _lblPinStatus.ForeColor = res.Success ? Color.FromArgb(52, 211, 153) : Color.FromArgb(248, 113, 113);
                 if (res.Success)
                 {
-                    _txtCurPin.Text = "";
                     _txtNewPin.Text = "";
                 }
             };
@@ -542,19 +545,20 @@ namespace RemoteHub.Agent
 
             _lblPinStatus = new Label
             {
-                Text = "",
-                Location = new Point(16, 230),
+                Text = "Host Laptop Recovery: No old PIN is required when setting a PIN directly from this computer.",
+                Location = new Point(16, 208),
                 Width = 538,
+                Font = new Font("Segoe UI", 8f),
                 ForeColor = Color.FromArgb(156, 163, 175)
             };
             card.Controls.Add(_lblPinStatus);
 
             // Emergency disconnect
-            card.Controls.Add(CreateHeaderLabel("Emergency Disconnect", 16, 270));
+            card.Controls.Add(CreateHeaderLabel("Emergency Disconnect", 16, 250));
             var btnEmerg = new Button
             {
                 Text = "Disconnect Any Active Remote Session Now",
-                Location = new Point(16, 300),
+                Location = new Point(16, 280),
                 Width = 538,
                 Height = 36,
                 BackColor = Color.FromArgb(220, 38, 38),

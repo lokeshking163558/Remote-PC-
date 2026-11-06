@@ -114,13 +114,13 @@ app.get('/api/downloads/windows-agent.txt', (req, res) => {
 
 app.get('/api/downloads/info', (req, res) => {
   res.json({
-    version: '1.3.1',
+    version: '1.3.2',
     platform: 'Windows 10 / Windows 11 (x64)',
-    sha256: '4B063557EC29E35668C4D6495F4A975AC12485D3FC51941C3FA023B6D98383CE',
+    sha256: '98FF8B6F9FFC158B629D66EFCEFA17D647E9C27A87A83AB98713246FF30483A6',
     filename: 'RemoteHubAgent.exe',
     downloadUrl: '/api/downloads/windows-agent',
     directGithubUrl: GITHUB_RELEASE_AGENT_EXE,
-    githubReleaseUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.1/RemoteHubAgent.exe',
+    githubReleaseUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.2/RemoteHubAgent.exe',
     githubLatestUrl: 'https://github.com/lokeshking163558/Remote-PC-/releases/latest',
     metadataUrl: '/api/downloads/windows-agent.txt'
   });

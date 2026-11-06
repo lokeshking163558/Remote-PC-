@@ -12,6 +12,7 @@ interface PinModalProps {
   };
   onClose: () => void;
   onSuccess: (sessionId: string, sessionToken: string, deviceId: string, deviceName: string) => void;
+  onSwitchToApprovalMode?: () => void;
 }
 
 export const PinModal: React.FC<PinModalProps> = ({ device, onClose, onSuccess }) => {
@@ -213,8 +214,20 @@ export const PinModal: React.FC<PinModalProps> = ({ device, onClose, onSuccess }
           )}
         </button>
 
+        {onSwitchToApprovalMode && (
+          <div className="mt-3 pt-3 border-t border-gray-800/80 text-center">
+            <button
+              type="button"
+              onClick={onSwitchToApprovalMode}
+              className="text-xs text-emerald-400 hover:text-emerald-300 font-medium transition-colors"
+            >
+              Prefer no PIN? Switch to "Ask for approval on laptop"
+            </button>
+          </div>
+        )}
+
         <p className="text-[11px] text-gray-500 text-center mt-3">
-          PIN verification is rate-limited and secured with Argon2id.
+          Forgot PIN? Reset directly on your host laptop via the Windows agent.
         </p>
       </div>
     </div>

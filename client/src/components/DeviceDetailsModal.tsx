@@ -175,7 +175,7 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({ deviceId
             }`}
           >
             <KeyRound className="w-3.5 h-3.5" />
-            Access PIN
+            Access Method & PIN
           </button>
           <button
             onClick={() => setActiveTab('history')}
@@ -327,56 +327,165 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({ deviceId
           </div>
         )}
 
-        {/* Tab 3: Change Access PIN */}
+        {/* Tab 3: Access Method & Security */}
         {activeTab === 'pin' && (
-          <form onSubmit={handleChangePin} className="space-y-4">
-            <p className="text-xs text-gray-400">
-              Update the permanent 6–8 digit PIN required to initiate a remote session on this computer.
-            </p>
+          <div className="space-y-6">
+            {/* Access Method Selection */}
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wider text-gray-400 block mb-2">
+                Connection Access Method
+              </label>
+              <div className="space-y-2">
+                {/* Method 1: Host Approval */}
+                <div
+                  onClick={async () => {
+                    await api.updateAccessMethod(deviceId, 'approval');
+                    fetchDetails();
+                    onDeviceUpdated?.();
+                  }}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                    (device.accessMethod === 'approval' || !device.accessMethod)
+                      ? 'bg-blue-600/10 border-blue-500 text-white'
+                      : 'bg-gray-900/40 border-gray-800 text-gray-400 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <input
+                        type="radio"
+                        checked={device.accessMethod === 'approval' || !device.accessMethod}
+                        onChange={() => {}}
+                        className="text-blue-500"
+                      />
+                      <span className="text-xs font-bold text-white">Ask for approval on laptop (Recommended)</span>
+                    </div>
+                    <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      Default
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-gray-400 mt-1.5 ml-6 leading-relaxed">
+                    Connecting requires clicking "Allow" on the laptop screen. No permanent PIN is required or stored.
+                  </p>
+                </div>
 
-            {pinStatus && (
-              <div
-                className={`p-3 rounded-xl border text-xs font-medium ${
-                  pinStatus.success
-                    ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                    : 'bg-red-500/10 border-red-500/20 text-red-400'
-                }`}
-              >
-                {pinStatus.message}
+                {/* Method 2: Permanent PIN */}
+                <div
+                  onClick={async () => {
+                    await api.updateAccessMethod(deviceId, 'pin');
+                    fetchDetails();
+                    onDeviceUpdated?.();
+                  }}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                    device.accessMethod === 'pin'
+                      ? 'bg-blue-600/10 border-blue-500 text-white'
+                      : 'bg-gray-900/40 border-gray-800 text-gray-400 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <input
+                      type="radio"
+                      checked={device.accessMethod === 'pin'}
+                      onChange={() => {}}
+                      className="text-blue-500"
+                    />
+                    <span className="text-xs font-bold text-white">Permanent Access PIN</span>
+                  </div>
+                  <p className="text-[11px] text-gray-400 mt-1.5 ml-6 leading-relaxed">
+                    Connect securely using a secret 6–8 digit PIN. Ideal for unattended or remote-only access.
+                  </p>
+                </div>
+
+                {/* Method 3: Trusted Browser Sessions */}
+                <div
+                  onClick={async () => {
+                    await api.updateAccessMethod(deviceId, 'trusted');
+                    fetchDetails();
+                    onDeviceUpdated?.();
+                  }}
+                  className={`p-3.5 rounded-xl border cursor-pointer transition-all ${
+                    device.accessMethod === 'trusted'
+                      ? 'bg-blue-600/10 border-blue-500 text-white'
+                      : 'bg-gray-900/40 border-gray-800 text-gray-400 hover:border-gray-700'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <input
+                      type="radio"
+                      checked={device.accessMethod === 'trusted'}
+                      onChange={() => {}}
+                      className="text-blue-500"
+                    />
+                    <span className="text-xs font-bold text-white">Trusted browser sessions (1-Click)</span>
+                  </div>
+                  <p className="text-[11px] text-gray-400 mt-1.5 ml-6 leading-relaxed">
+                    Instant 1-click connect from authenticated browser sessions of the registered account owner.
+                  </p>
+                </div>
               </div>
-            )}
-
-            <div>
-              <label className="text-xs font-semibold text-gray-300 block mb-1">Current PIN</label>
-              <input
-                type="password"
-                value={currentPin}
-                onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                placeholder="Leave blank if configuring for the first time"
-                className="w-full py-2.5 px-3 rounded-xl bg-gray-900 border border-gray-700 text-white font-mono text-sm focus:outline-none focus:border-blue-500"
-              />
             </div>
 
-            <div>
-              <label className="text-xs font-semibold text-gray-300 block mb-1">New Access PIN (6-8 Digits)</label>
-              <input
-                type="password"
-                value={newPin}
-                onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                maxLength={8}
-                placeholder="Enter new 6 to 8 digit PIN"
-                className="w-full py-2.5 px-3 rounded-xl bg-gray-900 border border-gray-700 text-white font-mono text-sm focus:outline-none focus:border-blue-500"
-              />
-            </div>
+            {/* PIN Configuration Form */}
+            <div className="p-4 rounded-xl bg-gray-900/60 border border-gray-800">
+              <h4 className="text-xs font-bold text-white mb-2">Configure / Update Permanent PIN</h4>
+              <p className="text-xs text-gray-400 mb-4">
+                {device.hasPin || device.pinConfigured
+                  ? 'A PIN is currently configured on this device. You can update it below.'
+                  : 'No PIN is currently configured. Enter a new PIN below if using PIN mode.'}
+              </p>
 
-            <button
-              type="submit"
-              disabled={changingPin || newPin.length < 6}
-              className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white font-semibold text-xs transition-all shadow-md shadow-blue-600/20"
-            >
-              {changingPin ? 'Updating PIN...' : 'Save New PIN'}
-            </button>
-          </form>
+              {pinStatus && (
+                <div
+                  className={`p-3 mb-4 rounded-xl border text-xs font-medium ${
+                    pinStatus.success
+                      ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                      : 'bg-red-500/10 border-red-500/20 text-red-400'
+                  }`}
+                >
+                  {pinStatus.message}
+                </div>
+              )}
+
+              <form onSubmit={handleChangePin} className="space-y-3">
+                {(device.hasPin || device.pinConfigured) && (
+                  <div>
+                    <label className="text-xs font-semibold text-gray-300 block mb-1">Current PIN</label>
+                    <input
+                      type="password"
+                      value={currentPin}
+                      onChange={(e) => setCurrentPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                      placeholder="Enter existing PIN"
+                      className="w-full py-2 px-3 rounded-xl bg-gray-900 border border-gray-700 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-xs font-semibold text-gray-300 block mb-1">New PIN (6–8 Digits)</label>
+                  <input
+                    type="password"
+                    value={newPin}
+                    onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                    maxLength={8}
+                    placeholder="Enter 6-8 digit PIN"
+                    className="w-full py-2 px-3 rounded-xl bg-gray-900 border border-gray-700 text-white font-mono text-xs focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="submit"
+                    disabled={changingPin || newPin.length < 6}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-gray-800 disabled:text-gray-500 text-white font-semibold text-xs transition-all shadow-md shadow-blue-600/20"
+                  >
+                    {changingPin ? 'Saving...' : 'Save PIN'}
+                  </button>
+                  <span className="text-[11px] text-gray-500">
+                    Forgot PIN? Reset directly on your host laptop via the desktop agent.
+                  </span>
+                </div>
+              </form>
+            </div>
+          </div>
         )}
 
         {/* Tab 4: Session History */}

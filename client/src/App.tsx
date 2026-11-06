@@ -8,6 +8,7 @@ import { SessionsPage } from './components/SessionsPage';
 import { SettingsPage } from './components/SettingsPage';
 import { AuthPages } from './components/AuthPages';
 import { PinModal } from './components/PinModal';
+import { PinSetupModal } from './components/PinSetupModal';
 import { AddDeviceModal } from './components/AddDeviceModal';
 import { DeviceDetailsModal } from './components/DeviceDetailsModal';
 import { RemoteDesktopStudio } from './components/RemoteDesktopStudio';
@@ -19,8 +20,10 @@ export const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<string>('dashboard');
   const [showAddDevice, setShowAddDevice] = useState(false);
   const [selectedDeviceForPin, setSelectedDeviceForPin] = useState<any | null>(null);
+  const [pinSetupDevice, setPinSetupDevice] = useState<any | null>(null);
   const [selectedDeviceForDetails, setSelectedDeviceForDetails] = useState<string | null>(null);
   const [connectingDeviceId, setConnectingDeviceId] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   // Active Remote Session state
   const [activeSession, setActiveSession] = useState<{
@@ -31,8 +34,12 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const handleConnectDevice = async (device: any) => {
-    // If device has Trusted Mode enabled (default), connect in 1-CLICK without PIN prompt!
-    if (device.trustedMode !== false) {
+    setConnectError(null);
+    const method = device.accessMethod || 'approval';
+
+    // Access Method 1: Ask for approval on laptop (Recommended & Default)
+    // Never show a PIN prompt! The owner approves from the laptop desktop notification.
+    if (method === 'approval') {
       setConnectingDeviceId(device.id);
       try {
         const res = await api.connectDevice(device.id);
@@ -42,16 +49,37 @@ export const App: React.FC = () => {
           deviceId: device.id,
           deviceName: device.deviceName
         });
-        return;
       } catch (err: any) {
-        console.warn('[Connect] Direct trusted connect prompt:', err);
-        // Fallback to PIN prompt if PIN is required or trusted mode not accepted
-        setSelectedDeviceForPin(device);
+        console.error('[Connect] Approval session request error:', err);
+        setConnectError(err.message || `Unable to reach ${device.deviceName}. Ensure the desktop agent is running.`);
       } finally {
         setConnectingDeviceId(null);
       }
+    } else if (method === 'pin') {
+      // Access Method 2: Permanent PIN
+      if (!device.hasPin) {
+        // No PIN configured yet -> provide explicit PIN setup screen
+        setPinSetupDevice(device);
+      } else {
+        // PIN exists -> show PIN entry modal
+        setSelectedDeviceForPin(device);
+      }
     } else {
-      setSelectedDeviceForPin(device);
+      // Access Method 3: Trusted Mode (1-Click)
+      setConnectingDeviceId(device.id);
+      try {
+        const res = await api.connectDevice(device.id);
+        setActiveSession({
+          sessionId: res.sessionId,
+          sessionToken: res.sessionToken,
+          deviceId: device.id,
+          deviceName: device.deviceName
+        });
+      } catch (err: any) {
+        setConnectError(err.message || `Unable to connect to ${device.deviceName}`);
+      } finally {
+        setConnectingDeviceId(null);
+      }
     }
   };
 
@@ -158,7 +186,7 @@ export const App: React.FC = () => {
         {currentView === 'settings' && <SettingsPage />}
       </main>
 
-      {/* PIN Verification Modal (Only displayed when trustedMode is disabled or PIN required) */}
+      {/* PIN Verification Modal */}
       {selectedDeviceForPin && (
         <PinModal
           device={selectedDeviceForPin}
@@ -167,7 +195,57 @@ export const App: React.FC = () => {
             setSelectedDeviceForPin(null);
             setActiveSession({ sessionId, sessionToken, deviceId, deviceName });
           }}
+          onSwitchToApprovalMode={async () => {
+            const dev = selectedDeviceForPin;
+            setSelectedDeviceForPin(null);
+            try {
+              await api.updateAccessMethod(dev.id, 'approval');
+              handleConnectDevice({ ...dev, accessMethod: 'approval' });
+            } catch {}
+          }}
         />
+      )}
+
+      {/* First-time PIN Setup Modal */}
+      {pinSetupDevice && (
+        <PinSetupModal
+          device={pinSetupDevice}
+          onClose={() => setPinSetupDevice(null)}
+          onSuccess={(newPin) => {
+            const dev = pinSetupDevice;
+            setPinSetupDevice(null);
+            handleConnectDevice({ ...dev, accessMethod: 'pin', hasPin: true });
+          }}
+          onSwitchToApprovalMode={async () => {
+            const dev = pinSetupDevice;
+            setPinSetupDevice(null);
+            try {
+              await api.updateAccessMethod(dev.id, 'approval');
+              handleConnectDevice({ ...dev, accessMethod: 'approval' });
+            } catch {}
+          }}
+        />
+      )}
+
+      {/* Meaningful Connection Error Toast/Modal */}
+      {connectError && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-md w-full bg-red-950/90 border border-red-800 text-white rounded-2xl p-4 shadow-2xl backdrop-blur-md animate-in slide-in-from-bottom duration-200">
+          <div className="flex items-start justify-between">
+            <div className="flex items-start gap-3">
+              <span className="text-xl">⚠️</span>
+              <div>
+                <h4 className="text-sm font-bold text-red-200">Connection Failed</h4>
+                <p className="text-xs text-red-300 mt-1 leading-relaxed">{connectError}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setConnectError(null)}
+              className="text-red-300 hover:text-white p-1 rounded-lg hover:bg-red-900/50"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Add Device Wizard Modal */}

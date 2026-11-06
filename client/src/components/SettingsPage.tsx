@@ -638,7 +638,11 @@ export const SettingsPage: React.FC = () => {
           <div className="space-y-3 text-xs text-gray-400">
             <div className="flex items-start gap-2">
               <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-              <span><strong>Trusted-Account 1-Click Access:</strong> Connect to your registered devices directly without re-typing PINs when in Trusted Mode. PIN prompt can be re-enabled at any time per device.</span>
+              <span><strong>Host Approval Mode (Default & Recommended):</strong> Remote connections prompt you to Allow or Deny directly on your laptop screen. No permanent PIN is required.</span>
+            </div>
+            <div className="flex items-start gap-2">
+              <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <span><strong>Permanent PIN & 1-Click Trusted Options:</strong> Switch access modes anytime under Computer Details. Access PINs are secured with Argon2id and can be reset locally on your laptop without the old PIN.</span>
             </div>
             <div className="flex items-start gap-2">
               <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />

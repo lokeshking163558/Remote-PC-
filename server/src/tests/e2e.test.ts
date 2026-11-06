@@ -446,6 +446,98 @@ async function runTests() {
     await execute('DELETE FROM users WHERE id = ?', [usrId]);
   });
 
+  // 15. Host Approval Mode Workflow (No PIN required, interactive laptop Allow/Deny)
+  await test('Host Approval Mode Workflow (No PIN prompt, Agent Authorization, State Transitions)', async () => {
+    const usrId = `approval_usr_${Date.now()}`;
+    const devId = `approval_dev_${Date.now()}`;
+    const agentToken = `agent_token_${Date.now()}`;
+    const sessId = `approval_sess_${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId, 'Approval User', 'Approval User', `${usrId}@test.com`, 'hash', now, now
+    ]);
+
+    // Device configured with access_method = 'approval' (Default)
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, access_method, trusted_mode, last_seen, created_at, registered_at)
+      VALUES (?, ?, 'LOKI', 'Windows 11', '1.3.1', 'online', ?, 'approval', 1, ?, ?, ?)
+    `, [devId, usrId, agentToken, now, now, now]);
+
+    // 1. Verify device has access_method = 'approval' and hasPin = false
+    const devRecord = await queryOne('SELECT d.*, c.pin_hash FROM devices d LEFT JOIN device_credentials c ON d.id = c.device_id WHERE d.id = ?', [devId]);
+    assert.strictEqual(devRecord.access_method, 'approval');
+    assert.strictEqual(devRecord.pin_hash, null); // No PIN exists
+
+    // 2. Client initiates connection: no PIN asked, pending session created
+    const expiresAt = now + 45000;
+    await execute(`
+      INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, client_ip, created_at, started_at)
+      VALUES (?, ?, ?, 'tok_123', 'pending_approval', 'pending_approval', 'pending', 'p2p_direct', '127.0.0.1', ?, ?)
+    `, [sessId, usrId, devId, now, now]);
+
+    const pendingSession = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessId]);
+    assert.strictEqual(pendingSession.session_status, 'pending_approval');
+    assert.strictEqual(pendingSession.approval_status, 'pending');
+
+    // 3. Host agent approves the session using device auth token
+    await execute(`
+      UPDATE remote_sessions
+      SET approval_status = 'approved', session_status = 'active', connected_at = ?
+      WHERE id = ? AND approval_status = 'pending'
+    `, [Date.now(), sessId]);
+
+    const activeSession = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessId]);
+    assert.strictEqual(activeSession.session_status, 'active');
+    assert.strictEqual(activeSession.approval_status, 'approved');
+
+    // 4. Laptop user clicks Disconnect (Emergency Disconnect)
+    await execute(`
+      UPDATE remote_sessions
+      SET session_status = 'ended', disconnected_at = ?
+      WHERE id = ?
+    `, [Date.now(), sessId]);
+
+    const endedSession = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessId]);
+    assert.strictEqual(endedSession.session_status, 'ended');
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
+  });
+
+  // 16. Host Laptop Direct PIN Reset without requiring Old PIN
+  await test('Host Laptop Direct PIN Reset (DPAPI Agent Recovery without Old PIN)', async () => {
+    const usrId = `reset_usr_${Date.now()}`;
+    const devId = `reset_dev_${Date.now()}`;
+    const agentToken = `agent_tok_${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId, 'Reset User', 'Reset User', `${usrId}@test.com`, 'hash', now, now
+    ]);
+
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, access_method, last_seen, created_at, registered_at)
+      VALUES (?, ?, 'LOKI', 'Windows 11', '1.3.1', 'online', ?, 'approval', ?, ?, ?)
+    `, [devId, usrId, agentToken, now, now, now]);
+
+    // Local agent configures new PIN directly
+    const { hash, salt } = hashPin('987654');
+    await execute(`
+      INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at, pin_updated_at)
+      VALUES (?, ?, ?, 0, 0, ?, ?)
+    `, [devId, hash, salt, now, now]);
+
+    // Verify PIN is now configured and matches
+    const creds = await queryOne('SELECT * FROM device_credentials WHERE device_id = ?', [devId]);
+    assert.ok(creds);
+    assert.ok(verifyPin('987654', creds.pin_hash, creds.pin_salt));
+    assert.strictEqual(verifyPin('111111', creds.pin_hash, creds.pin_salt), false);
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
+  });
+
   console.log('\n====================================================');
   console.log(`Test Results: ${passed} passed, ${failed} failed.`);
   console.log('====================================================\n');

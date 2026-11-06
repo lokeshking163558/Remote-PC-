@@ -572,7 +572,13 @@ export function setDevicePendingRequest(deviceId: string, request: any) {
       type: 'server:session-request',
       sessionId: request.sessionId,
       userId: request.userId,
-      clientIp: request.clientIp
+      accountName: request.accountName || '',
+      accountEmail: request.accountEmail || '',
+      deviceName: request.deviceName || 'LOKI',
+      clientIp: request.clientIp || 'Web Browser',
+      userAgent: request.userAgent || '',
+      expiresAt: request.expiresAt || 0,
+      createdAt: request.createdAt || Date.now()
     }));
   }
 }

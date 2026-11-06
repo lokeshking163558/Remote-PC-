@@ -184,6 +184,7 @@ export async function initDatabase(): Promise<void> {
 
       ALTER TABLE devices ADD COLUMN IF NOT EXISTS installation_id VARCHAR(128);
       ALTER TABLE devices ADD COLUMN IF NOT EXISTS trusted_mode INT DEFAULT 1;
+      ALTER TABLE devices ADD COLUMN IF NOT EXISTS access_method VARCHAR(50) DEFAULT 'approval';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
 
@@ -369,6 +370,28 @@ export async function initDatabase(): Promise<void> {
       }
       if (!devColNames.includes('trusted_mode')) {
         sqliteDb.exec('ALTER TABLE devices ADD COLUMN trusted_mode INTEGER DEFAULT 1');
+      }
+      if (!devColNames.includes('access_method')) {
+        sqliteDb.exec("ALTER TABLE devices ADD COLUMN access_method TEXT DEFAULT 'approval'");
+        sqliteDb.exec("UPDATE devices SET access_method = 'approval' WHERE access_method IS NULL");
+      }
+    } catch {}
+
+    try {
+      const credCols: any[] = sqliteDb.prepare("PRAGMA table_info(device_credentials)").all();
+      const credColNames = credCols.map((c) => c.name);
+      console.log('[DB] device_credentials columns:', credColNames);
+      if (!credColNames.includes('updated_at')) {
+        sqliteDb.exec('ALTER TABLE device_credentials ADD COLUMN updated_at INTEGER DEFAULT 0');
+      }
+      if (!credColNames.includes('failed_attempts')) {
+        sqliteDb.exec('ALTER TABLE device_credentials ADD COLUMN failed_attempts INTEGER DEFAULT 0');
+      }
+      if (!credColNames.includes('lockout_until')) {
+        sqliteDb.exec('ALTER TABLE device_credentials ADD COLUMN lockout_until INTEGER DEFAULT 0');
+      }
+      if (!credColNames.includes('pin_updated_at')) {
+        sqliteDb.exec('ALTER TABLE device_credentials ADD COLUMN pin_updated_at INTEGER DEFAULT 0');
       }
     } catch {}
 

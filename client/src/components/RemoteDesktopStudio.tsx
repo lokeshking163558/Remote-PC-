@@ -59,7 +59,9 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
 
   // Connection & Session State Management
   const [sessionStatus, setSessionStatus] = useState<RemoteSessionStatus>('authorizing');
-  const [statusMessage, setStatusMessage] = useState('Verifying access PIN. Waiting for laptop user approval...');
+  const [statusMessage, setStatusMessage] = useState('Waiting for laptop user approval...');
+  const [isAwaitingApproval, setIsAwaitingApproval] = useState(true);
+  const [approvalCountdown, setApprovalCountdown] = useState(45);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -341,6 +343,23 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
     }
   }, [sendSignal, renderFrameBuffer]);
 
+  // Host Approval Countdown Effect
+  useEffect(() => {
+    if (!isAwaitingApproval) return;
+    const interval = setInterval(() => {
+      setApprovalCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setSessionStatus('failed');
+          setErrorMessage(`No response was received from ${deviceName} within 45 seconds.`);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isAwaitingApproval, deviceName]);
+
   // -------------------------------------------------------------
   // Universal Dual-Transport Signaling (WebSocket + HTTP Polling)
   // -------------------------------------------------------------
@@ -351,13 +370,13 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
     let connectionTimeoutTimer: NodeJS.Timeout | null = null;
     let lastSignalTimestamp = 0;
 
-    // Timeout safeguard: 25 seconds before reporting friendly error
+    // Timeout safeguard: 50 seconds before reporting friendly error (allows full 45s host approval window)
     connectionTimeoutTimer = setTimeout(() => {
       if (!isStreamingRef.current && !isCancelled) {
         setSessionStatus('failed');
-        setErrorMessage('Unable to establish remote connection. The desktop agent may be unreachable or the host user did not respond.');
+        setErrorMessage(`Unable to establish remote connection with ${deviceName}. The approval request timed out or the desktop host is unreachable.`);
       }
-    }, 25000);
+    }, 50000);
 
     // 1. WebSocket Signaling Attempt
     const wsBase = getWsBaseUrl();
@@ -444,15 +463,18 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
     // 4. Inbound Signal Processor
     const handleIncomingSignalingMessage = async (msg: any) => {
       if (msg.type === 'server:session-connected') {
-        setStatusMessage('Connection request sent. Waiting for host computer approval...');
+        setStatusMessage(`Connection request sent. Waiting for approval on ${deviceName}...`);
       } else if (msg.type === 'server:session-approved') {
+        setIsAwaitingApproval(false);
         setStatusMessage('Host approved connection! Starting WebRTC streaming pipeline...');
         setSessionStatus('starting_capture');
         initWebRtcConnection();
       } else if (msg.type === 'server:session-rejected') {
+        setIsAwaitingApproval(false);
         setSessionStatus('failed');
-        setErrorMessage(msg.reason || 'The host computer user declined the remote connection.');
+        setErrorMessage(msg.reason || `The remote connection request was declined on ${deviceName}.`);
       } else if (msg.type === 'server:session-ended') {
+        setIsAwaitingApproval(false);
         setSessionStatus('disconnected');
         setStatusMessage(`Session ended: ${msg.reason || 'Host closed remote session'}`);
       } else if (msg.type === 'answer') {
@@ -881,8 +903,37 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
           }`}
         />
 
-        {/* Loading / Negotiating Overlay (Hidden once actual frames arrive!) */}
-        {!isStreaming && sessionStatus !== 'failed' && (
+        {/* Host Approval Pending Overlay */}
+        {isAwaitingApproval && !isStreaming && sessionStatus !== 'failed' && (
+          <div className="absolute inset-0 bg-[#0a0d14]/90 flex flex-col items-center justify-center p-6 text-center backdrop-blur-md z-30 animate-in fade-in duration-200">
+            <div className="relative mb-6">
+              <div className="w-16 h-16 rounded-2xl bg-blue-600/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
+                <Laptop className="w-8 h-8 animate-pulse" />
+              </div>
+              <div className="absolute -inset-2 rounded-3xl border-2 border-blue-500/20 animate-ping pointer-events-none" />
+            </div>
+
+            <h3 className="text-lg font-bold text-white mb-2">Waiting for Approval on {deviceName}</h3>
+            <p className="text-xs text-gray-300 max-w-md mb-6 leading-relaxed">
+              A remote connection prompt has appeared on your computer screen. Click <strong className="text-emerald-400">Allow</strong> on <strong className="text-white">{deviceName}</strong> to start viewing your desktop.
+            </p>
+
+            <div className="flex items-center gap-2 mb-6 px-3.5 py-1.5 rounded-full bg-gray-900 border border-gray-800 text-xs font-mono text-gray-400">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span>Auto-denying in {approvalCountdown}s</span>
+            </div>
+
+            <button
+              onClick={onDisconnect}
+              className="px-4 py-2 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-300 hover:text-white font-semibold text-xs transition-colors"
+            >
+              Cancel Request
+            </button>
+          </div>
+        )}
+
+        {/* Loading / Negotiating Overlay (Shown when approved and establishing media pipeline) */}
+        {!isAwaitingApproval && !isStreaming && sessionStatus !== 'failed' && (
           <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-6 text-center backdrop-blur-sm z-30">
             <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4 shadow-lg shadow-blue-600/30" />
             <h3 className="text-base font-bold text-white mb-1">{statusMessage}</h3>

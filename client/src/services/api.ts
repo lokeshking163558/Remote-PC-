@@ -29,10 +29,10 @@ export function getWsBaseUrl(): string {
 }
 
 export const GITHUB_LATEST_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/latest/download/RemoteHubAgent.exe';
-export const DIRECT_GITHUB_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.1/RemoteHubAgent.exe';
+export const DIRECT_GITHUB_AGENT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.2/RemoteHubAgent.exe';
 export const DIRECT_GITHUB_AGENT_TXT_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/raw/main/windows-agent.txt';
 export const GITHUB_RELEASES_PAGE_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases';
-export const GITHUB_TAG_RELEASE_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.1/RemoteHubAgent.exe';
+export const GITHUB_TAG_RELEASE_DOWNLOAD_URL = 'https://github.com/lokeshking163558/Remote-PC-/releases/download/v1.3.2/RemoteHubAgent.exe';
 
 export function getAgentDownloadUrl(): string {
   const backend = getBackendUrl();
@@ -332,6 +332,24 @@ export const api = {
 
   async verifyPin(deviceId: string, pin: string) {
     return this.connectDevice(deviceId, pin);
+  },
+
+  async updateAccessMethod(deviceId: string, accessMethod: 'approval' | 'pin' | 'trusted') {
+    const res = await fetchWithAuth(getApiEndpoint(`/devices/${deviceId}/access-method`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessMethod })
+    });
+    return handleResponse<{ success: boolean; accessMethod: string; hasPin: boolean; message: string }>(res);
+  },
+
+  async setupPin(deviceId: string, newPin: string) {
+    const res = await fetchWithAuth(getApiEndpoint(`/devices/${deviceId}/setup-pin`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPin })
+    });
+    return handleResponse<{ success: boolean; message: string }>(res);
   },
 
   async setTrustedMode(deviceId: string, trustedMode: boolean) {

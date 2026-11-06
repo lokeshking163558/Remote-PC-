@@ -135,6 +135,10 @@ namespace RemoteHub.Agent
                         {
                             _config.AccountUserId = ownerProp.GetString() ?? _config.AccountUserId;
                         }
+                        if (doc.RootElement.TryGetProperty("accessMethod", out var amProp))
+                        {
+                            _config.AccessMethod = amProp.GetString() ?? _config.AccessMethod;
+                        }
                         _config.Save();
                         AddLog($"Server registration confirmed for account: {_config.AccountEmail}");
                         SetState(AgentConnectionState.Online, "Registration verified by server");
@@ -491,7 +495,18 @@ namespace RemoteHub.Agent
             string sessionId = sessIdProp.GetString() ?? "";
             if (string.IsNullOrEmpty(sessionId)) return;
 
-            string clientIp = req.TryGetProperty("clientIp", out var ip) ? ip.GetString() ?? "" : "";
+            string clientIp = req.TryGetProperty("clientIp", out var ip) ? ip.GetString() ?? "Web Browser" : "Web Browser";
+            string deviceName = req.TryGetProperty("deviceName", out var dn) ? dn.GetString() ?? _config.DeviceName : _config.DeviceName;
+            string accountName = req.TryGetProperty("accountName", out var an) ? an.GetString() ?? "" : "";
+            string accountEmail = req.TryGetProperty("accountEmail", out var ae) ? ae.GetString() ?? "" : "";
+            string userAgent = req.TryGetProperty("userAgent", out var ua) ? ua.GetString() ?? "" : "";
+            long expiresAt = req.TryGetProperty("expiresAt", out var exp) ? exp.GetInt64() : 0;
+
+            if (expiresAt > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= expiresAt)
+            {
+                AddLog($"Ignoring expired incoming session request {sessionId.Substring(0, Math.Min(8, sessionId.Length))}");
+                return;
+            }
 
             if (_config.PauseRemoteAccess)
             {
@@ -500,20 +515,28 @@ namespace RemoteHub.Agent
                 return;
             }
 
-            AddLog($"Remote session connection requested by {clientIp}. Prompting user on desktop...");
+            AddLog($"Remote session connection requested from {clientIp}. Prompting user on desktop...");
+
+            string safeAccount = !string.IsNullOrEmpty(accountName)
+                ? $"Authorized RemoteHub account ({accountName})"
+                : (!string.IsNullOrEmpty(accountEmail) ? $"Authorized RemoteHub account ({accountEmail})" : "Authorized RemoteHub account");
+
+            string safeRequestedFrom = !string.IsNullOrEmpty(userAgent)
+                ? $"{clientIp} ({GetFriendlyBrowser(userAgent)})"
+                : clientIp;
 
             // Launch approval prompt on STA desktop thread
             var staThread = new Thread(() =>
             {
-                var prompt = new ApprovalPromptForm(clientIp);
+                var prompt = new ApprovalPromptForm(deviceName, safeAccount, safeRequestedFrom, 45);
                 prompt.Approved += async (s, e) =>
                 {
-                    AddLog($"Host user APPROVED remote session from {clientIp}");
+                    AddLog($"Host user ALLOWED remote connection from {clientIp}");
                     await ApproveSessionAsync(sessionId, clientIp);
                 };
                 prompt.Rejected += async (s, e) =>
                 {
-                    AddLog($"Host user REJECTED remote session from {clientIp}");
+                    AddLog($"Host user DENIED remote connection from {clientIp}");
                     await RejectSessionAsync(sessionId, "Host user declined connection");
                 };
                 Application.Run(prompt);
@@ -522,18 +545,34 @@ namespace RemoteHub.Agent
             staThread.Start();
         }
 
+        private static string GetFriendlyBrowser(string ua)
+        {
+            if (string.IsNullOrEmpty(ua)) return "Web Browser";
+            if (ua.Contains("Edg/")) return "Microsoft Edge";
+            if (ua.Contains("Chrome/")) return "Google Chrome";
+            if (ua.Contains("Firefox/")) return "Mozilla Firefox";
+            if (ua.Contains("Safari/") && !ua.Contains("Chrome/")) return "Apple Safari";
+            return "Web Browser";
+        }
+
         private async Task ApproveSessionAsync(string sessionId, string clientIp)
         {
             _activeSessionId = sessionId;
             _banner.ShowSession(clientIp);
 
-            // 1. Notify server via HTTP endpoint
+            // 1. Notify server via HTTP endpoint with device auth token
             try
             {
                 string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/approve";
-                await _httpClient.PostAsync(url, new StringContent("{}", Encoding.UTF8, "application/json"));
+                using var req = new HttpRequestMessage(HttpMethod.Post, url);
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _config.AuthToken);
+                req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+                await _httpClient.SendAsync(req);
             }
-            catch {}
+            catch (Exception ex)
+            {
+                AddLog($"Session approval notification error: {ex.Message}");
+            }
 
             // 2. Also send over WebSocket if open
             await SendTextMessageAsync(new { type = "agent:approve-session", sessionId });
@@ -547,9 +586,15 @@ namespace RemoteHub.Agent
             try
             {
                 string url = $"{_config.ServerUrl.TrimEnd('/')}/api/sessions/{sessionId}/reject";
-                await _httpClient.PostAsync(url, new StringContent(JsonSerializer.Serialize(new { reason }), Encoding.UTF8, "application/json"));
+                using var req = new HttpRequestMessage(HttpMethod.Post, url);
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _config.AuthToken);
+                req.Content = new StringContent(JsonSerializer.Serialize(new { reason }), Encoding.UTF8, "application/json");
+                await _httpClient.SendAsync(req);
             }
-            catch {}
+            catch (Exception ex)
+            {
+                AddLog($"Session rejection notification error: {ex.Message}");
+            }
 
             await SendTextMessageAsync(new { type = "agent:reject-session", sessionId, reason });
             _activeSessionId = null;
@@ -914,6 +959,44 @@ namespace RemoteHub.Agent
             catch (Exception ex)
             {
                 AddLog($"PIN update failed: {ex.Message}");
+                return (false, $"Network error: {ex.Message}");
+            }
+        }
+
+        // Reset / Set Permanent Access PIN locally on host laptop (No old PIN needed)
+        public async Task<(bool Success, string Message)> ResetPinLocalAsync(string newPin)
+        {
+            if (!_config.IsConfigured || string.IsNullOrWhiteSpace(newPin))
+                return (false, "Device is not configured or PIN is empty.");
+
+            if (newPin.Length < 6 || newPin.Length > 8)
+                return (false, "PIN must be 6 to 8 digits.");
+
+            try
+            {
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}/reset-pin-local";
+                var payload = new { newPin };
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+                using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+                request.Headers.Add("Authorization", $"Bearer {_config.AuthToken}");
+
+                var res = await _httpClient.SendAsync(request);
+                if (res.IsSuccessStatusCode)
+                {
+                    _config.AccessMethod = "pin";
+                    _config.Save();
+                    AddLog("Permanent Access PIN configured/reset locally on host laptop.");
+                    return (true, "Access PIN saved successfully. Computer is now PIN protected.");
+                }
+                else
+                {
+                    return (false, $"Failed to update PIN (HTTP {(int)res.StatusCode}).");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Local PIN reset error: {ex.Message}");
                 return (false, $"Network error: {ex.Message}");
             }
         }

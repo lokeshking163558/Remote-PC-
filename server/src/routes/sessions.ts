@@ -70,24 +70,44 @@ sessionsRouter.get('/:id', requireAuth, async (req: AuthenticatedRequest, res: R
 sessionsRouter.post('/:id/approve', async (req, res) => {
   try {
     const sessionId = req.params.id;
+    const token = req.headers.authorization?.replace('Bearer ', '').trim();
     const session = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessionId]);
 
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
+    if (session.approval_status !== 'pending') {
+      return res.status(400).json({ error: `Session is already ${session.approval_status}` });
+    }
+
     const now = Date.now();
+    // Expiration check (45s window + 15s grace = 60s max)
+    if (session.created_at && (now - Number(session.created_at)) > 60000) {
+      await execute("UPDATE remote_sessions SET approval_status = 'expired', session_status = 'ended', disconnected_at = ? WHERE id = ?", [now, sessionId]);
+      return res.status(410).json({ error: 'Approval request has expired' });
+    }
+
+    // Verify caller credential if supplied (must match device auth_token or session_token)
+    if (token) {
+      const device = await queryOne('SELECT auth_token FROM devices WHERE id = ?', [session.device_id]);
+      if (device && device.auth_token !== token && session.session_token !== token) {
+        return res.status(403).json({ error: 'Unauthorized device credential' });
+      }
+    }
+
     await execute(`
       UPDATE remote_sessions
       SET approval_status = 'approved', session_status = 'active', connected_at = ?
       WHERE id = ?
     `, [now, sessionId]);
 
+    clearDevicePendingRequest(session.device_id, sessionId);
     approveSessionAndNotify(sessionId);
 
     await execute(
       'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [session.user_id, session.device_id, 'session_approved', 'Host user approved remote connection', req.ip || '', now]
+      [session.user_id, session.device_id, 'session_approved', 'Host user approved remote connection on laptop', req.ip || '', now]
     );
 
     return res.json({ success: true, message: 'Session approved' });
@@ -101,10 +121,19 @@ sessionsRouter.post('/:id/approve', async (req, res) => {
 sessionsRouter.post('/:id/reject', async (req, res) => {
   try {
     const sessionId = req.params.id;
+    const { reason } = req.body || {};
+    const token = req.headers.authorization?.replace('Bearer ', '').trim();
     const session = await queryOne('SELECT * FROM remote_sessions WHERE id = ?', [sessionId]);
 
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (token) {
+      const device = await queryOne('SELECT auth_token FROM devices WHERE id = ?', [session.device_id]);
+      if (device && device.auth_token !== token && session.session_token !== token) {
+        return res.status(403).json({ error: 'Unauthorized device credential' });
+      }
     }
 
     const now = Date.now();
@@ -114,11 +143,12 @@ sessionsRouter.post('/:id/reject', async (req, res) => {
       WHERE id = ?
     `, [now, sessionId]);
 
-    rejectSessionAndNotify(sessionId, 'Host user rejected the remote session request');
+    clearDevicePendingRequest(session.device_id, sessionId);
+    rejectSessionAndNotify(sessionId, reason || 'Host user declined remote connection request');
 
     await execute(
       'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [session.user_id, session.device_id, 'session_rejected', 'Host user declined remote connection request', req.ip || '', now]
+      [session.user_id, session.device_id, 'session_rejected', `Host user declined remote connection: ${reason || 'Declined'}`, req.ip || '', now]
     );
 
     return res.json({ success: true, message: 'Session rejected' });

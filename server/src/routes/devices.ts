@@ -35,6 +35,7 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
         d.installation_id AS "installationId",
         d.wake_support AS "wakeSupport",
         d.trusted_mode AS "trustedMode",
+        d.access_method AS "accessMethod",
         d.created_at AS "registeredAt",
         CASE WHEN c.pin_hash IS NOT NULL THEN true ELSE false END AS "hasPin",
         c.failed_attempts AS "failedAttempts",
@@ -88,6 +89,7 @@ devicesRouter.get('/', requireAuth, async (req: AuthenticatedRequest, res: Respo
           registeredAt: Number(d.registeredAt),
           hasPin: Boolean(d.hasPin),
           trustedMode: d.trustedMode === undefined || d.trustedMode === null ? true : Boolean(d.trustedMode),
+          accessMethod: d.accessMethod || 'approval',
           isLocked,
           lockoutUntil: Number(d.lockoutUntil),
           latestMetrics: latestMetrics || null
@@ -340,6 +342,7 @@ devicesRouter.post('/verify-registration', async (req, res) => {
       accountEmail: device.email,
       accountName: device.name || device.full_name || '',
       deviceName: device.device_name,
+      accessMethod: device.access_method || 'approval',
       trustedMode: device.trusted_mode === undefined || device.trusted_mode === null ? true : Boolean(device.trusted_mode)
     });
   } catch (err: any) {
@@ -697,6 +700,8 @@ devicesRouter.get('/:id', requireAuth, async (req: AuthenticatedRequest, res: Re
         isLocked,
         lockoutUntil: Number(device.lockout_until),
         failedAttempts: device.failed_attempts,
+        accessMethod: device.access_method || 'approval',
+        hasPin: Boolean(device.pin_updated_at),
         pinConfigured: Boolean(device.pin_updated_at),
         pinUpdatedAt: Number(device.pin_updated_at),
         latestMetrics: metrics || null,
@@ -751,13 +756,13 @@ devicesRouter.delete('/:id', requireAuth, async (req: AuthenticatedRequest, res:
   }
 });
 
-// 9. POST /api/devices/:id/verify-pin & POST /api/devices/:id/connect (Initiate remote session with PIN or Trusted Mode)
+// 9. POST /api/devices/:id/verify-pin & POST /api/devices/:id/connect (Initiate remote session)
 const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { pin } = req.body;
     const deviceId = req.params.id;
 
-    const device = await queryOne('SELECT id, device_name, device_status, trusted_mode FROM devices WHERE id = ? AND user_id = ?', [
+    const device = await queryOne('SELECT id, device_name, device_status, trusted_mode, access_method FROM devices WHERE id = ? AND user_id = ?', [
       deviceId,
       req.user!.id
     ]);
@@ -767,25 +772,79 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
     }
 
     if (device.device_status !== 'online') {
-      return res.status(400).json({ error: 'Device is currently offline. Cannot establish a remote session.' });
+      return res.status(400).json({
+        error: `${device.device_name} is currently offline. Please ensure the Windows agent is running.`,
+        isOffline: true
+      });
     }
 
     const creds = await queryOne('SELECT * FROM device_credentials WHERE device_id = ?', [deviceId]);
-    const isTrustedMode = device.trusted_mode === undefined || device.trusted_mode === null || Number(device.trusted_mode) !== 0;
+    const accessMethod = device.access_method || 'approval';
+    const now = Date.now();
 
-    // Enforce PIN validation only if not in trusted mode OR if a PIN was explicitly provided
-    if (!isTrustedMode || pin) {
-      if (!pin) {
-        return res.status(400).json({ error: 'Access PIN is required for this computer' });
-      }
+    // Access Method 1: Ask for approval on laptop (Recommended & Default)
+    // No PIN verification is required or prompted. Laptop host approves via desktop popup.
+    if (accessMethod === 'approval') {
+      const sessionId = crypto.randomUUID();
+      const sessionToken = generateSessionToken(req.user!.id, deviceId, sessionId);
+      const expiresAt = now + 45000; // 45s expiration window
 
+      await execute(`
+        INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, client_ip, created_at, started_at)
+        VALUES (?, ?, ?, ?, 'pending_approval', 'pending_approval', 'pending', 'p2p_direct', ?, ?, ?)
+      `, [sessionId, req.user!.id, deviceId, sessionToken, req.ip || '', now, now]);
+
+      // Notify the Windows agent via WebSocket and HTTP signaling
+      setDevicePendingRequest(deviceId, {
+        sessionId,
+        sessionToken,
+        deviceId,
+        deviceName: device.device_name,
+        userId: req.user!.id,
+        accountName: req.user!.name || req.user!.email,
+        accountEmail: req.user!.email,
+        clientIp: req.ip || 'Remote Browser',
+        userAgent: req.headers['user-agent'] || '',
+        expiresAt,
+        createdAt: now,
+        approvalStatus: 'pending'
+      });
+
+      await execute(
+        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [req.user!.id, deviceId, 'session_requested', `Host approval connection requested for ${device.device_name}`, req.ip || '', now]
+      );
+
+      return res.json({
+        success: true,
+        sessionId,
+        sessionToken,
+        deviceId,
+        deviceName: device.device_name,
+        accessMethod: 'approval',
+        status: 'pending_approval',
+        approvalRequired: true,
+        expiresInSeconds: 45
+      });
+    }
+
+    // Access Method 2: Permanent PIN
+    if (accessMethod === 'pin') {
       if (!creds || !creds.pin_hash) {
-        return res.status(400).json({ error: 'No PIN has been configured for this computer' });
+        return res.status(400).json({
+          error: 'No access PIN has been configured for this computer yet',
+          requiresPinSetup: true
+        });
       }
 
-      const now = Date.now();
-      const lockoutUntil = Number(creds.lockout_until);
+      if (!pin) {
+        return res.status(400).json({
+          error: 'Access PIN is required for this computer',
+          requiresPin: true
+        });
+      }
 
+      const lockoutUntil = Number(creds.lockout_until);
       if (lockoutUntil > now) {
         const remainingSeconds = Math.ceil((lockoutUntil - now) / 1000);
         const remainingMinutes = Math.ceil(remainingSeconds / 60);
@@ -803,7 +862,6 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
       }
 
       const isMatch = verifyPin(pin, creds.pin_hash, creds.pin_salt);
-
       if (!isMatch) {
         const failedAttempts = (creds.failed_attempts || 0) + 1;
         let newLockout = 0;
@@ -844,31 +902,61 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
 
       // PIN verified successfully
       await execute('UPDATE device_credentials SET failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [deviceId]);
-    }
-    await execute('UPDATE device_credentials SET failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [deviceId]);
 
+      const sessionId = crypto.randomUUID();
+      const sessionToken = generateSessionToken(req.user!.id, deviceId, sessionId);
+
+      await execute(`
+        INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, client_ip, created_at, started_at)
+        VALUES (?, ?, ?, ?, 'authorized', 'authorized', 'approved', 'p2p_direct', ?, ?, ?)
+      `, [sessionId, req.user!.id, deviceId, sessionToken, req.ip || '', now, now]);
+
+      // Notify agent directly to begin capture
+      setDevicePendingRequest(deviceId, {
+        sessionId,
+        sessionToken,
+        deviceId,
+        deviceName: device.device_name,
+        userId: req.user!.id,
+        accountName: req.user!.name || req.user!.email,
+        accountEmail: req.user!.email,
+        clientIp: req.ip || 'Remote Browser',
+        createdAt: now,
+        approvalStatus: 'approved'
+      });
+
+      return res.json({
+        success: true,
+        sessionId,
+        sessionToken,
+        deviceId,
+        deviceName: device.device_name,
+        accessMethod: 'pin',
+        approvalRequired: false
+      });
+    }
+
+    // Access Method 3: Trusted Browser Session (1-Click Instant Connect)
     const sessionId = crypto.randomUUID();
     const sessionToken = generateSessionToken(req.user!.id, deviceId, sessionId);
 
     await execute(`
       INSERT INTO remote_sessions (id, user_id, device_id, session_token, session_status, status, approval_status, connection_type, client_ip, created_at, started_at)
-      VALUES (?, ?, ?, ?, 'authorized', 'authorized', 'pending', 'p2p_direct', ?, ?, ?)
+      VALUES (?, ?, ?, ?, 'authorized', 'authorized', 'approved', 'p2p_direct', ?, ?, ?)
     `, [sessionId, req.user!.id, deviceId, sessionToken, req.ip || '', now, now]);
 
-    // Dispatch pending session request to agent (works over active WebSocket OR HTTP agent polling)
     setDevicePendingRequest(deviceId, {
       sessionId,
       sessionToken,
+      deviceId,
+      deviceName: device.device_name,
       userId: req.user!.id,
-      clientIp: req.ip || '',
+      accountName: req.user!.name || req.user!.email,
+      accountEmail: req.user!.email,
+      clientIp: req.ip || 'Remote Browser',
       createdAt: now,
-      approvalStatus: 'pending'
+      approvalStatus: 'approved'
     });
-
-    await execute(
-      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [req.user!.id, deviceId, 'pin_verified', 'Session authorized, awaiting host approval', req.ip || '', now]
-    );
 
     return res.json({
       success: true,
@@ -876,17 +964,150 @@ const handleConnectAndPin = async (req: AuthenticatedRequest, res: Response) => 
       sessionToken,
       deviceId,
       deviceName: device.device_name,
-      approvalRequired: true,
-      expiresInSeconds: 60
+      accessMethod: 'trusted',
+      approvalRequired: false
     });
   } catch (err: any) {
-    console.error('PIN verification error:', err);
-    return res.status(500).json({ error: 'Failed to verify PIN' });
+    console.error('Session initiation error:', err);
+    return res.status(500).json({ error: 'Failed to initiate remote connection' });
   }
 };
 
 devicesRouter.post('/:id/verify-pin', requireAuth, handleConnectAndPin);
 devicesRouter.post('/:id/connect', requireAuth, handleConnectAndPin);
+
+// Update Access Method: 'approval' (default), 'pin', or 'trusted'
+devicesRouter.patch('/:id/access-method', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { accessMethod } = req.body;
+    const deviceId = req.params.id;
+
+    if (!['approval', 'pin', 'trusted'].includes(accessMethod)) {
+      return res.status(400).json({ error: 'Access method must be "approval", "pin", or "trusted"' });
+    }
+
+    const device = await queryOne('SELECT id, device_name FROM devices WHERE id = ? AND user_id = ?', [deviceId, req.user!.id]);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const creds = await queryOne('SELECT pin_hash FROM device_credentials WHERE device_id = ?', [deviceId]);
+    const hasPin = Boolean(creds && creds.pin_hash);
+
+    const trustedVal = accessMethod === 'trusted' ? 1 : 0;
+    await execute('UPDATE devices SET access_method = ?, trusted_mode = ? WHERE id = ?', [accessMethod, trustedVal, deviceId]);
+
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, deviceId, 'access_method_updated', `Access method set to ${accessMethod}`, req.ip || '', Date.now()]
+    );
+
+    return res.json({
+      success: true,
+      accessMethod,
+      hasPin,
+      message: `Access method updated to ${accessMethod === 'approval' ? 'Ask for approval on laptop' : (accessMethod === 'pin' ? 'Permanent PIN' : 'Trusted browser sessions')}`
+    });
+  } catch (err: any) {
+    console.error('Update access method error:', err);
+    return res.status(500).json({ error: 'Failed to update access method' });
+  }
+});
+
+// Local host recovery from Windows agent (requires physical agent auth_token, no current PIN needed)
+const handleLocalPinReset = async (req: any, res: Response) => {
+  try {
+    const deviceId = req.params.id;
+    const { newPin } = req.body;
+    const token = req.headers.authorization?.replace('Bearer ', '').trim() || req.query.token as string;
+
+    if (!token) {
+      return res.status(401).json({ error: 'Missing device authentication token' });
+    }
+
+    const device = await queryOne('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?', [deviceId]);
+    if (!device || device.auth_token !== token) {
+      return res.status(403).json({ error: 'Unauthorized device credential' });
+    }
+
+    if (!newPin || !/^\d{6,8}$/.test(newPin)) {
+      return res.status(400).json({ error: 'New PIN must be 6 to 8 digits' });
+    }
+
+    const { hash, salt } = hashPin(newPin);
+    const now = Date.now();
+
+    const creds = await queryOne('SELECT device_id FROM device_credentials WHERE device_id = ?', [deviceId]);
+    if (creds) {
+      await execute('UPDATE device_credentials SET pin_hash = ?, pin_salt = ?, updated_at = ?, pin_updated_at = ?, failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [
+        hash, salt, now, now, deviceId
+      ]);
+    } else {
+      await execute('INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at, pin_updated_at) VALUES (?, ?, ?, 0, 0, ?, ?)', [
+        deviceId, hash, salt, now, now
+      ]);
+    }
+
+    // Also update device access_method to 'pin' if configured
+    await execute("UPDATE devices SET access_method = 'pin', trusted_mode = 0 WHERE id = ?", [deviceId]);
+
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [device.user_id, deviceId, 'pin_reset_local', 'PIN reset/updated locally on host computer', req.ip || '', now]
+    );
+
+    return res.json({ success: true, message: 'Permanent access PIN successfully updated on host laptop' });
+  } catch (err: any) {
+    console.error('Local PIN update error:', err);
+    return res.status(500).json({ error: 'Failed to update PIN' });
+  }
+};
+
+devicesRouter.put('/:id/pin', handleLocalPinReset);
+devicesRouter.post('/:id/reset-pin-local', handleLocalPinReset);
+
+// First-time Web PIN setup (does not require old PIN if none currently exists)
+devicesRouter.post('/:id/setup-pin', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { newPin } = req.body;
+    const deviceId = req.params.id;
+
+    if (!newPin || !/^\d{6,8}$/.test(newPin)) {
+      return res.status(400).json({ error: 'PIN must be 6 to 8 digits' });
+    }
+
+    const device = await queryOne('SELECT id FROM devices WHERE id = ? AND user_id = ?', [deviceId, req.user!.id]);
+    if (!device) {
+      return res.status(404).json({ error: 'Device not found' });
+    }
+
+    const { hash, salt } = hashPin(newPin);
+    const now = Date.now();
+
+    const creds = await queryOne('SELECT device_id FROM device_credentials WHERE device_id = ?', [deviceId]);
+    if (creds) {
+      await execute('UPDATE device_credentials SET pin_hash = ?, pin_salt = ?, updated_at = ?, pin_updated_at = ?, failed_attempts = 0, lockout_until = 0 WHERE device_id = ?', [
+        hash, salt, now, now, deviceId
+      ]);
+    } else {
+      await execute('INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at, pin_updated_at) VALUES (?, ?, ?, 0, 0, ?, ?)', [
+        deviceId, hash, salt, now, now
+      ]);
+    }
+
+    await execute("UPDATE devices SET access_method = 'pin', trusted_mode = 0 WHERE id = ?", [deviceId]);
+
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.user!.id, deviceId, 'pin_created', 'Initial permanent access PIN created', req.ip || '', now]
+    );
+
+    return res.json({ success: true, message: 'Permanent access PIN configured successfully' });
+  } catch (err: any) {
+    console.error('Setup PIN error:', err);
+    return res.status(500).json({ error: 'Failed to configure PIN' });
+  }
+});
 
 // Toggle Trusted Account Mode (1-Click Connect vs PIN-Protected)
 devicesRouter.patch('/:id/trusted-mode', requireAuth, async (req: AuthenticatedRequest, res: Response) => {

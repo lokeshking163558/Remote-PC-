@@ -29,6 +29,7 @@ interface Device {
   onlineStatus: boolean;
   deviceStatus?: 'online' | 'reconnecting' | 'offline';
   trustedMode?: boolean;
+  accessMethod?: 'approval' | 'pin' | 'trusted';
   lastSeen: number;
   lastSeenSecondsAgo?: number;
   installationId?: string;
@@ -409,20 +410,26 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
                   {/* Security & Access Mode Badge */}
                   <div className="flex items-center justify-between text-[11px] text-gray-400 mb-5">
-                    <span className="flex items-center gap-1">
-                      <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
-                      <span>{device.trustedMode !== false ? 'Trusted 1-Click Access' : 'PIN Protected'}</span>
+                    <span className="flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="font-medium text-gray-300">
+                        {device.accessMethod === 'approval' || (!device.accessMethod && device.trustedMode !== false)
+                          ? 'Laptop Approval'
+                          : (device.accessMethod === 'pin' ? 'PIN Protected' : '1-Click Trusted')}
+                      </span>
                     </span>
                     <button
                       onClick={async () => {
-                        const newMode = device.trustedMode === false ? true : false;
-                        await api.setTrustedMode(device.id, newMode);
+                        const nextMethod = (device.accessMethod === 'approval' || !device.accessMethod)
+                          ? 'pin'
+                          : (device.accessMethod === 'pin' ? 'trusted' : 'approval');
+                        await api.updateAccessMethod(device.id, nextMethod as any);
                         fetchDevices();
                       }}
                       className="text-[10px] text-blue-400 hover:text-blue-300 underline"
-                      title="Toggle 1-Click Connect vs PIN requirement"
+                      title="Switch access method"
                     >
-                      {device.trustedMode !== false ? 'Require PIN' : 'Enable 1-Click'}
+                      Change
                     </button>
                   </div>
                 </div>
@@ -442,7 +449,11 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
                     ) : (
                       <>
                         <Power className="w-3.5 h-3.5" />
-                        <span>{device.trustedMode !== false ? '1-Click Connect' : 'Connect'}</span>
+                        <span>
+                          {device.accessMethod === 'pin'
+                            ? 'Connect (PIN)'
+                            : (device.accessMethod === 'trusted' ? '1-Click Connect' : 'Connect')}
+                        </span>
                       </>
                     )}
                   </button>

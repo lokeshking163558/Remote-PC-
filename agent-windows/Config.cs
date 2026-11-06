@@ -30,6 +30,7 @@ namespace RemoteHub.Agent
         public string DeviceName { get; set; } = Environment.MachineName;
         public string AccountEmail { get; set; } = string.Empty;
         public string AccountUserId { get; set; } = string.Empty;
+        public string AccessMethod { get; set; } = "approval";
         public string ServerRegistrationStatus { get; set; } = "unverified";
         public bool IsServerVerified { get; set; } = false;
         public bool AutoStart { get; set; } = true;
