@@ -18,7 +18,8 @@ import {
   RefreshCw,
   Info,
   ShieldCheck,
-  CheckCircle2
+  CheckCircle2,
+  Laptop
 } from 'lucide-react';
 import { api, getWsBaseUrl } from '../services/api';
 
@@ -219,6 +220,13 @@ export const RemoteDesktopStudio: React.FC<RemoteDesktopStudioProps> = ({
         }
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(imageBitmap, 0, 0);
+
+        // Immediately remove loading overlay on first decoded frame
+        if (!isStreamingRef.current) {
+          isStreamingRef.current = true;
+          setSessionStatus('streaming');
+          setStatusMessage('Streaming active');
+        }
 
         setDiagInfo(d => ({
           ...d,

@@ -12,6 +12,7 @@ import { PinSetupModal } from './components/PinSetupModal';
 import { AddDeviceModal } from './components/AddDeviceModal';
 import { DeviceDetailsModal } from './components/DeviceDetailsModal';
 import { RemoteDesktopStudio } from './components/RemoteDesktopStudio';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { WifiOff, RefreshCw, LogIn, Server, RotateCcw, Activity, CheckCircle2, AlertTriangle, Download } from 'lucide-react';
 
 export const App: React.FC = () => {
@@ -235,14 +236,16 @@ export const App: React.FC = () => {
   // Active full-screen remote desktop session
   if (activeSession) {
     return (
-      <RemoteDesktopStudio
-        sessionId={activeSession.sessionId}
-        sessionToken={activeSession.sessionToken}
-        deviceId={activeSession.deviceId}
-        deviceName={activeSession.deviceName}
-        approvalRequired={activeSession.approvalRequired}
-        onDisconnect={() => setActiveSession(null)}
-      />
+      <ErrorBoundary onReset={() => setActiveSession(null)}>
+        <RemoteDesktopStudio
+          sessionId={activeSession.sessionId}
+          sessionToken={activeSession.sessionToken}
+          deviceId={activeSession.deviceId}
+          deviceName={activeSession.deviceName}
+          approvalRequired={activeSession.approvalRequired}
+          onDisconnect={() => setActiveSession(null)}
+        />
+      </ErrorBoundary>
     );
   }
 

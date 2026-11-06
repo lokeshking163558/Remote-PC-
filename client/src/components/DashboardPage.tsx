@@ -181,7 +181,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
 
         <div className="flex items-center gap-2.5">
           <button
-            onClick={fetchDevices}
+            onClick={() => fetchDevices()}
             title="Refresh devices"
             className="p-2.5 rounded-xl bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-400 hover:text-white transition-colors"
           >
@@ -244,7 +244,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           <h3 className="text-base font-bold text-white mb-1">Unable to load your computers</h3>
           <p className="text-xs text-red-300 max-w-md mx-auto mb-5">{fetchError}</p>
           <button
-            onClick={fetchDevices}
+            onClick={() => fetchDevices()}
             className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-all shadow-md shadow-red-600/20"
           >
             <RefreshCw className="w-3.5 h-3.5" />

@@ -614,7 +614,7 @@ devicesRouter.post('/heartbeat', async (req, res) => {
       lastSeen: now
     });
 
-    const pendingSession = getDevicePendingRequest(deviceId);
+    const pendingSession = await getDevicePendingRequest(deviceId);
     return res.json({ success: true, timestamp: now, pendingSession });
   } catch (err: any) {
     console.error('Heartbeat error:', err);

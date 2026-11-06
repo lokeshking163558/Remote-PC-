@@ -15,7 +15,7 @@ interface PinModalProps {
   onSwitchToApprovalMode?: () => void;
 }
 
-export const PinModal: React.FC<PinModalProps> = ({ device, onClose, onSuccess }) => {
+export const PinModal: React.FC<PinModalProps> = ({ device, onClose, onSuccess, onSwitchToApprovalMode }) => {
   const [pin, setPin] = useState('');
   const [showPin, setShowPin] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
