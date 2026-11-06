@@ -219,32 +219,109 @@ namespace RemoteHub.Agent
 
             if (_config.IsConfigured)
             {
-                _pnlPairing.Controls.Add(CreateHeaderLabel("✓ Linked to RemoteHub Account", 16, 12));
+                bool isVerified = _config.IsServerVerified || _config.ServerRegistrationStatus == "confirmed";
 
-                var lblDesc = new Label
+                if (isVerified)
                 {
-                    Text = "This computer is permanently registered to your RemoteHub account.",
-                    Location = new Point(16, 38),
-                    Width = 538,
-                    ForeColor = Color.FromArgb(52, 211, 153),
-                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-                };
-                _pnlPairing.Controls.Add(lblDesc);
+                    _pnlPairing.Controls.Add(CreateHeaderLabel("✓ Linked to RemoteHub Account", 16, 12));
 
-                var lblDetails = new Label
+                    var lblDesc = new Label
+                    {
+                        Text = "This computer is permanently registered to your RemoteHub account.",
+                        Location = new Point(16, 38),
+                        Width = 538,
+                        ForeColor = Color.FromArgb(52, 211, 153),
+                        Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+                    };
+                    _pnlPairing.Controls.Add(lblDesc);
+
+                    var lblDetails = new Label
+                    {
+                        Text = $"Computer Name: {_config.DeviceName}\n" +
+                               $"Device ID: {_config.DeviceId}\n" +
+                               $"Linked Account: {(string.IsNullOrEmpty(_config.AccountEmail) ? "Authenticated Owner" : _config.AccountEmail)}\n" +
+                               $"Credentials Store: Windows DPAPI Hardware-bound\n\n" +
+                               $"Ready for 1-Click Connect from your web dashboard without entering pairing codes.",
+                        Location = new Point(16, 68),
+                        Width = 538,
+                        Height = 110,
+                        ForeColor = Color.FromArgb(209, 213, 219),
+                        Font = new Font("Segoe UI", 9f)
+                    };
+                    _pnlPairing.Controls.Add(lblDetails);
+                }
+                else
                 {
-                    Text = $"Computer Name: {_config.DeviceName}\n" +
-                           $"Device ID: {_config.DeviceId}\n" +
-                           $"Automatic Startup Reconnect: Enabled\n" +
-                           $"Credentials Store: Windows DPAPI Encrypted\n\n" +
-                           $"Ready for 1-Click Connect from your web dashboard without entering pairing codes.",
-                    Location = new Point(16, 68),
-                    Width = 538,
-                    Height = 110,
-                    ForeColor = Color.FromArgb(209, 213, 219),
-                    Font = new Font("Segoe UI", 9f)
-                };
-                _pnlPairing.Controls.Add(lblDetails);
+                    _pnlPairing.Controls.Add(CreateHeaderLabel("⚠️ Server Synchronization Required", 16, 12));
+
+                    var lblDesc = new Label
+                    {
+                        Text = "This computer has saved credentials, but the server has not confirmed the registration.",
+                        Location = new Point(16, 38),
+                        Width = 538,
+                        ForeColor = Color.FromArgb(251, 191, 36),
+                        Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+                    };
+                    _pnlPairing.Controls.Add(lblDesc);
+
+                    var lblDetails = new Label
+                    {
+                        Text = $"Computer Name: {_config.DeviceName}\n" +
+                               $"Device ID: {_config.DeviceId}\n" +
+                               $"Server State: {_config.ServerRegistrationStatus}\n\n" +
+                               $"Click 'Verify Connection' or enter a pairing code below to re-link to your account:",
+                        Location = new Point(16, 68),
+                        Width = 538,
+                        Height = 70,
+                        ForeColor = Color.FromArgb(209, 213, 219),
+                        Font = new Font("Segoe UI", 9f)
+                    };
+                    _pnlPairing.Controls.Add(lblDetails);
+
+                    var btnVerify = new Button
+                    {
+                        Text = "Verify with Server",
+                        Location = new Point(16, 145),
+                        Width = 160,
+                        Height = 32,
+                        BackColor = Color.FromArgb(37, 99, 235),
+                        ForeColor = Color.White,
+                        FlatStyle = FlatStyle.Flat,
+                        Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                        Cursor = Cursors.Hand
+                    };
+                    btnVerify.FlatAppearance.BorderSize = 0;
+                    btnVerify.Click += async (s, e) =>
+                    {
+                        btnVerify.Enabled = false;
+                        btnVerify.Text = "Checking...";
+                        await _client.VerifyServerRegistrationAsync();
+                        UpdatePairingPanelContents();
+                    };
+                    _pnlPairing.Controls.Add(btnVerify);
+
+                    var btnShowPair = new Button
+                    {
+                        Text = "Re-pair with Code",
+                        Location = new Point(186, 145),
+                        Width = 160,
+                        Height = 32,
+                        BackColor = Color.FromArgb(55, 65, 81),
+                        ForeColor = Color.White,
+                        FlatStyle = FlatStyle.Flat,
+                        Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                        Cursor = Cursors.Hand
+                    };
+                    btnShowPair.FlatAppearance.BorderSize = 0;
+                    btnShowPair.Click += (s, e) =>
+                    {
+                        _config.IsServerVerified = false;
+                        _config.ServerRegistrationStatus = "unpaired";
+                        _config.DeviceId = "";
+                        UpdatePairingPanelContents();
+                    };
+                    _pnlPairing.Controls.Add(btnShowPair);
+                }
             }
             else
             {
@@ -733,10 +810,16 @@ namespace RemoteHub.Agent
                     using var doc = JsonDocument.Parse(resBody);
                     string deviceId = doc.RootElement.GetProperty("deviceId").GetString() ?? "";
                     string authToken = doc.RootElement.GetProperty("authToken").GetString() ?? "";
+                    string accountEmail = doc.RootElement.TryGetProperty("accountEmail", out var em) ? (em.GetString() ?? "") : "";
+                    string userId = doc.RootElement.TryGetProperty("userId", out var uid) ? (uid.GetString() ?? "") : "";
 
                     _config.DeviceId = deviceId;
                     _config.AuthToken = authToken;
                     _config.DeviceName = name;
+                    _config.AccountEmail = accountEmail;
+                    _config.AccountUserId = userId;
+                    _config.IsServerVerified = true;
+                    _config.ServerRegistrationStatus = "confirmed";
                     _config.Save();
 
                     _lblPairStatus.Text = "✓ Successfully paired! Agent is now connected.";

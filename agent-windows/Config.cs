@@ -29,6 +29,9 @@ namespace RemoteHub.Agent
         public string InstallationId { get; set; } = string.Empty;
         public string DeviceName { get; set; } = Environment.MachineName;
         public string AccountEmail { get; set; } = string.Empty;
+        public string AccountUserId { get; set; } = string.Empty;
+        public string ServerRegistrationStatus { get; set; } = "unverified";
+        public bool IsServerVerified { get; set; } = false;
         public bool AutoStart { get; set; } = true;
         public bool LaunchMinimized { get; set; } = true;
         public bool PauseRemoteAccess { get; set; } = false;
@@ -144,6 +147,9 @@ namespace RemoteHub.Agent
             AuthTokenProtected = string.Empty;
             LegacyAuthToken = null;
             AccountEmail = string.Empty;
+            AccountUserId = string.Empty;
+            IsServerVerified = false;
+            ServerRegistrationStatus = "unverified";
             Save();
         }
 

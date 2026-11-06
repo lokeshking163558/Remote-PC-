@@ -253,11 +253,19 @@ devicesRouter.post('/pair', async (req, res) => {
     // Invalidate single-use pairing code
     await execute('DELETE FROM pairing_codes WHERE code = ?', [pairingCode]);
 
+    // Fetch account details to confirm ownership to the agent
+    const user = await queryOne('SELECT email, name, full_name FROM users WHERE id = ?', [userId]);
+    const accountEmail = user?.email || '';
+    const accountName = user?.name || user?.full_name || '';
+
     return res.status(201).json({
       success: true,
       deviceId: finalDeviceId,
       authToken,
       deviceName: deviceName.trim(),
+      userId,
+      accountEmail,
+      accountName,
       isExisting: !!existingDevice,
       message: existingDevice
         ? 'Existing computer successfully re-paired and updated'
@@ -266,6 +274,240 @@ devicesRouter.post('/pair', async (req, res) => {
   } catch (err: any) {
     console.error('Device pairing error:', err);
     return res.status(500).json({ error: 'Failed to pair device' });
+  }
+});
+
+// 3b. POST /api/devices/verify-registration (Server-Confirmed Registration for Agent)
+devicesRouter.post('/verify-registration', async (req, res) => {
+  try {
+    const { deviceId, authToken, installationId, deviceName } = req.body;
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Device ID is required', verified: false });
+    }
+
+    const device = await queryOne(`
+      SELECT d.*, u.email, u.name, u.full_name
+      FROM devices d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.id = ?
+    `, [deviceId]);
+
+    if (!device) {
+      // Check if another device has the same installation_id for fallback recovery
+      let matchedByInstallation: any = null;
+      if (installationId) {
+        matchedByInstallation = await queryOne(`
+          SELECT d.*, u.email, u.name, u.full_name
+          FROM devices d
+          JOIN users u ON d.user_id = u.id
+          WHERE d.installation_id = ?
+        `, [installationId]);
+      }
+
+      return res.status(404).json({
+        verified: false,
+        status: 'not_registered',
+        error: 'Device record not found in the server database',
+        deviceId,
+        installationId: installationId || null,
+        alternativeDeviceId: matchedByInstallation?.id || null,
+        canRecover: true
+      });
+    }
+
+    if (authToken && device.auth_token !== authToken) {
+      return res.status(401).json({
+        verified: false,
+        status: 'token_mismatch',
+        error: 'Device authentication token does not match server record',
+        deviceId
+      });
+    }
+
+    // Update last_seen and online status on successful server verification
+    const now = Date.now();
+    await execute(`
+      UPDATE devices
+      SET device_status = 'online', last_seen = ?
+      WHERE id = ?
+    `, [now, deviceId]);
+
+    return res.json({
+      verified: true,
+      status: 'confirmed',
+      deviceId: device.id,
+      ownerId: device.user_id,
+      accountEmail: device.email,
+      accountName: device.name || device.full_name || '',
+      deviceName: device.device_name,
+      trustedMode: device.trusted_mode === undefined || device.trusted_mode === null ? true : Boolean(device.trusted_mode)
+    });
+  } catch (err: any) {
+    console.error('Verify registration error:', err);
+    return res.status(500).json({ error: 'Failed to verify device registration', verified: false });
+  }
+});
+
+// 3c. POST /api/devices/restore-device (Safe Account Sync & Device Recovery without creating duplicates)
+devicesRouter.post('/restore-device', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { deviceId, installationId, deviceName, authToken, os, pin } = req.body;
+    const userId = req.user!.id;
+    const now = Date.now();
+
+    if (!deviceId) {
+      return res.status(400).json({ error: 'Device ID is required for recovery' });
+    }
+
+    const finalName = (deviceName || 'My Computer').trim();
+    const finalToken = authToken || generateDeviceAuthToken();
+
+    // Check if device already exists in the database
+    const existing = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+
+    if (existing) {
+      if (existing.user_id !== userId) {
+        return res.status(403).json({
+          error: 'This computer is currently registered to a different RemoteHub account.',
+          ownerId: existing.user_id
+        });
+      }
+
+      // Existing device belongs to this user: update credentials and bring online
+      await execute(`
+        UPDATE devices
+        SET device_name = ?, auth_token = COALESCE(?, auth_token),
+            installation_id = COALESCE(?, installation_id),
+            device_status = 'online', last_seen = ?, trusted_mode = 1
+        WHERE id = ?
+      `, [finalName, authToken || null, installationId || null, now, deviceId]);
+
+      if (pin && /^\d{6,8}$/.test(pin)) {
+        const { hash, salt } = hashPin(pin);
+        await execute(`
+          UPDATE device_credentials
+          SET pin_hash = ?, pin_salt = ?, failed_attempts = 0, lockout_until = 0, updated_at = ?
+          WHERE device_id = ?
+        `, [hash, salt, now, deviceId]);
+      }
+
+      await execute(
+        'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, deviceId, 'device_resynced', `Device re-synchronized: ${finalName}`, req.ip || '', now]
+      );
+
+      return res.json({
+        success: true,
+        message: 'Computer successfully re-synchronized with your account',
+        deviceId,
+        isNew: false
+      });
+    }
+
+    // Device does not exist on server (e.g. database re-initialized): restore using original Device ID!
+    await execute(`
+      INSERT INTO devices (
+        id, user_id, device_name, operating_system, agent_version, device_status,
+        auth_token, trusted_mode, last_seen, installation_id, wake_support, created_at, registered_at
+      )
+      VALUES (?, ?, ?, ?, '1.3.0', 'online', ?, 1, ?, ?, 1, ?, ?)
+    `, [
+      deviceId,
+      userId,
+      finalName,
+      os || 'Windows 11',
+      finalToken,
+      now,
+      installationId || null,
+      now,
+      now
+    ]);
+
+    if (pin && /^\d{6,8}$/.test(pin)) {
+      const { hash, salt } = hashPin(pin);
+      await execute(`
+        INSERT INTO device_credentials (device_id, pin_hash, pin_salt, failed_attempts, lockout_until, updated_at)
+        VALUES (?, ?, ?, 0, 0, ?)
+      `, [deviceId, hash, salt, now]);
+    }
+
+    await execute(
+      'INSERT INTO audit_logs (user_id, device_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, deviceId, 'device_restored', `Device restored with permanent ID: ${finalName}`, req.ip || '', now]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Computer successfully registered and linked to your account',
+      deviceId,
+      authToken: finalToken,
+      isNew: true
+    });
+  } catch (err: any) {
+    console.error('Restore device error:', err);
+    return res.status(500).json({ error: 'Failed to restore computer registration' });
+  }
+});
+
+// 3d. GET /api/devices/diagnostics (Complete Diagnostics Panel Data)
+devicesRouter.get('/diagnostics', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const now = Date.now();
+
+    // Count system totals safely
+    const totalUsersRow = await queryOne('SELECT COUNT(*) as count FROM users');
+    const totalDevicesRow = await queryOne('SELECT COUNT(*) as count FROM devices');
+    const userDevices = await query(`
+      SELECT d.*, c.pin_hash IS NOT NULL as has_pin
+      FROM devices d
+      LEFT JOIN device_credentials c ON d.id = c.device_id
+      WHERE d.user_id = ?
+      ORDER BY d.last_seen DESC
+    `, [userId]);
+
+    return res.json({
+      account: {
+        userId: req.user!.id,
+        email: req.user!.email,
+        fullName: req.user!.fullName
+      },
+      backend: {
+        serverUrl: `${req.protocol}://${req.get('host')}`,
+        uptime: process.uptime(),
+        database: {
+          ...getDatabaseStatus(),
+          totalUsers: Number(totalUsersRow?.count || 0),
+          totalDevices: Number(totalDevicesRow?.count || 0),
+          userDeviceCount: userDevices.length
+        }
+      },
+      devices: userDevices.map((d: any) => {
+        const lastSeen = Number(d.last_seen);
+        const elapsedMs = Math.max(0, now - lastSeen);
+        let dynamicStatus: 'online' | 'reconnecting' | 'offline';
+        if (elapsedMs <= 45000) dynamicStatus = 'online';
+        else if (elapsedMs <= 90000) dynamicStatus = 'reconnecting';
+        else dynamicStatus = 'offline';
+
+        return {
+          id: d.id,
+          deviceName: d.device_name,
+          os: d.operating_system || d.os || 'Windows',
+          deviceStatus: dynamicStatus,
+          onlineStatus: dynamicStatus === 'online',
+          lastSeen,
+          lastSeenSecondsAgo: Math.floor(elapsedMs / 1000),
+          installationId: d.installation_id || null,
+          hasPin: Boolean(d.has_pin),
+          trustedMode: d.trusted_mode === undefined || d.trusted_mode === null ? true : Boolean(d.trusted_mode),
+          ownerId: d.user_id
+        };
+      })
+    });
+  } catch (err: any) {
+    console.error('Get diagnostics error:', err);
+    return res.status(500).json({ error: 'Failed to load device diagnostics' });
   }
 });
 
@@ -327,7 +569,16 @@ devicesRouter.post('/heartbeat', async (req, res) => {
 
     const device = await queryOne('SELECT * FROM devices WHERE id = ? AND auth_token = ?', [deviceId, authToken]);
     if (!device) {
-      return res.status(401).json({ error: 'Invalid device credentials' });
+      const existingById = await queryOne('SELECT id, user_id FROM devices WHERE id = ?', [deviceId]);
+      if (existingById) {
+        return res.status(401).json({ error: 'Invalid device credentials', code: 'TOKEN_MISMATCH' });
+      }
+      return res.status(404).json({
+        error: 'Device not registered on server',
+        code: 'NEEDS_SYNC',
+        deviceId,
+        canRecover: true
+      });
     }
 
     const now = Date.now();

@@ -85,6 +85,9 @@ namespace RemoteHub.Agent
 
             AddLog($"Starting background agent network services (Server: {_config.ServerUrl})...");
 
+            // 0. Verify registration with backend server to confirm ownership and active state
+            Task.Run(() => VerifyServerRegistrationAsync(_cts.Token));
+
             // 1. WebSocket signaling loop (if server supports WebSockets)
             Task.Run(() => ConnectionLoopAsync(_cts.Token));
 
@@ -93,6 +96,75 @@ namespace RemoteHub.Agent
 
             // 3. HTTP Agent Polling loop (guarantees session requests arrive even when WebSockets are unavailable e.g. Vercel)
             Task.Run(() => HttpAgentPollingLoopAsync(_cts.Token));
+        }
+
+        public async Task<bool> VerifyServerRegistrationAsync(CancellationToken ct = default)
+        {
+            if (!_config.IsConfigured) return false;
+
+            try
+            {
+                var payload = new
+                {
+                    deviceId = _config.DeviceId,
+                    authToken = _config.AuthToken,
+                    installationId = _config.InstallationId,
+                    deviceName = _config.DeviceName
+                };
+
+                string json = JsonSerializer.Serialize(payload);
+                var content = new StringContent(json, Encoding.UTF8, "application/json");
+                string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/verify-registration";
+
+                var res = await _httpClient.PostAsync(url, content, ct);
+                string resBody = await res.Content.ReadAsStringAsync(ct);
+
+                if (res.IsSuccessStatusCode)
+                {
+                    using var doc = JsonDocument.Parse(resBody);
+                    bool verified = doc.RootElement.GetProperty("verified").GetBoolean();
+                    if (verified)
+                    {
+                        _config.IsServerVerified = true;
+                        _config.ServerRegistrationStatus = "confirmed";
+                        if (doc.RootElement.TryGetProperty("accountEmail", out var emailProp))
+                        {
+                            _config.AccountEmail = emailProp.GetString() ?? _config.AccountEmail;
+                        }
+                        if (doc.RootElement.TryGetProperty("ownerId", out var ownerProp))
+                        {
+                            _config.AccountUserId = ownerProp.GetString() ?? _config.AccountUserId;
+                        }
+                        _config.Save();
+                        AddLog($"Server registration confirmed for account: {_config.AccountEmail}");
+                        SetState(AgentConnectionState.Online, "Registration verified by server");
+                        return true;
+                    }
+                }
+                else if (res.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    _config.IsServerVerified = false;
+                    _config.ServerRegistrationStatus = "not_registered";
+                    _config.Save();
+                    AddLog("Notice: This computer is not yet in the active server database (synchronization required).");
+                    SetState(AgentConnectionState.Reconnecting, "Computer awaiting server synchronization");
+                    return false;
+                }
+                else if (res.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                {
+                    _config.IsServerVerified = false;
+                    _config.ServerRegistrationStatus = "token_mismatch";
+                    _config.Save();
+                    AddLog("Device authentication token rejected by server.");
+                    SetState(AgentConnectionState.Disconnected, "Invalid device credentials");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Registration verification network check: {ex.Message}");
+            }
+            return false;
         }
 
         public void Stop()
@@ -185,6 +257,12 @@ namespace RemoteHub.Agent
                 }
                 else
                 {
+                    if (res.StatusCode == System.Net.HttpStatusCode.NotFound || res.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    {
+                        _config.IsServerVerified = false;
+                        _config.ServerRegistrationStatus = res.StatusCode == System.Net.HttpStatusCode.NotFound ? "not_registered" : "token_mismatch";
+                        SetState(AgentConnectionState.Reconnecting, "Computer awaiting server synchronization");
+                    }
                     AddLog($"HTTP Heartbeat rejected (HTTP {(int)res.StatusCode})");
                     return false;
                 }

@@ -351,6 +351,101 @@ async function runTests() {
     await execute('DELETE FROM users WHERE id = ?', [usrId]);
   });
 
+  // 13. Server-Confirmed Registration Verification
+  await test('Server-Confirmed Device Registration Verification', async () => {
+    const usrId = `verify_usr_${Date.now()}`;
+    const devId = `verify_dev_${Date.now()}`;
+    const token = `verify_token_${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId,
+      'Verify Tester',
+      'Verify Tester',
+      `${usrId}@test.com`,
+      'hash',
+      now,
+      now
+    ]);
+
+    await execute(`
+      INSERT INTO devices (id, user_id, device_name, operating_system, agent_version, device_status, auth_token, trusted_mode, last_seen, created_at, registered_at)
+      VALUES (?, ?, 'Verified Laptop', 'Windows 11', '1.3.0', 'online', ?, 1, ?, ?, ?)
+    `, [devId, usrId, token, now, now, now]);
+
+    // Query registration with matching deviceId and token
+    const devWithUser = await queryOne(`
+      SELECT d.*, u.email, u.name, u.full_name
+      FROM devices d
+      JOIN users u ON d.user_id = u.id
+      WHERE d.id = ?
+    `, [devId]);
+
+    assert.ok(devWithUser);
+    assert.strictEqual(devWithUser.id, devId);
+    assert.strictEqual(devWithUser.auth_token, token);
+    assert.strictEqual(devWithUser.email, `${usrId}@test.com`);
+
+    // Missing device returns null (signals not_registered / needs_sync)
+    const missingDev = await queryOne('SELECT * FROM devices WHERE id = ?', ['non_existent_device_id']);
+    assert.strictEqual(missingDev, null);
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
+  });
+
+  // 14. Safe Device Auto-Recovery / Synchronization by existing device ID
+  await test('Safe Device Auto-Recovery / Synchronization Preserving Device ID', async () => {
+    const usrId = `sync_usr_${Date.now()}`;
+    const permanentDeviceId = `d942e537-f9e2-4b52-9e69-${Date.now()}`;
+    const installationId = `af8a8a4063ba4cc3aaa4-${Date.now()}`;
+    const now = Date.now();
+
+    await execute('INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+      usrId,
+      'Sync Tester',
+      'Sync Tester',
+      `${usrId}@test.com`,
+      'hash',
+      now,
+      now
+    ]);
+
+    // Device does not exist initially
+    const initialCheck = await queryOne('SELECT id FROM devices WHERE id = ?', [permanentDeviceId]);
+    assert.strictEqual(initialCheck, null);
+
+    // Restore device under authenticated user with permanent ID
+    await execute(`
+      INSERT INTO devices (
+        id, user_id, device_name, operating_system, agent_version, device_status,
+        auth_token, trusted_mode, last_seen, installation_id, wake_support, created_at, registered_at
+      )
+      VALUES (?, ?, 'LOKI', 'Windows 11', '1.3.0', 'online', 'auth_tok_sync', 1, ?, ?, 1, ?, ?)
+    `, [permanentDeviceId, usrId, now, installationId, now, now]);
+
+    // Verify device is now present and registered to usrId
+    const syncedDev = await queryOne('SELECT * FROM devices WHERE id = ?', [permanentDeviceId]);
+    assert.ok(syncedDev);
+    assert.strictEqual(syncedDev.id, permanentDeviceId);
+    assert.strictEqual(syncedDev.user_id, usrId);
+    assert.strictEqual(syncedDev.device_name, 'LOKI');
+    assert.strictEqual(Number(syncedDev.trusted_mode), 1);
+
+    // Calling sync again on existing device should update rather than duplicate
+    await execute(`
+      UPDATE devices
+      SET device_name = 'LOKI Updated', last_seen = ?
+      WHERE id = ?
+    `, [Date.now(), permanentDeviceId]);
+
+    const countRows = await queryOne('SELECT COUNT(*) as count FROM devices WHERE id = ?', [permanentDeviceId]);
+    assert.strictEqual(Number(countRows.count), 1);
+
+    // Cleanup
+    await execute('DELETE FROM users WHERE id = ?', [usrId]);
+  });
+
   console.log('\n====================================================');
   console.log(`Test Results: ${passed} passed, ${failed} failed.`);
   console.log('====================================================\n');

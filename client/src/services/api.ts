@@ -267,6 +267,40 @@ export const api = {
     return handleResponse<{ devices: any[] }>(res);
   },
 
+  async getDeviceDiagnostics() {
+    const res = await fetchWithAuth(getApiEndpoint('/devices/diagnostics'));
+    return handleResponse<{
+      account: { userId: string; email: string; fullName: string };
+      backend: { serverUrl: string; uptime: number; database: any };
+      devices: any[];
+    }>(res);
+  },
+
+  async restoreDevice(data: {
+    deviceId: string;
+    installationId?: string;
+    deviceName?: string;
+    authToken?: string;
+    os?: string;
+    pin?: string;
+  }) {
+    const res = await fetchWithAuth(getApiEndpoint('/devices/restore-device'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    return handleResponse<{ success: boolean; message: string; deviceId: string; authToken?: string; isNew: boolean }>(res);
+  },
+
+  async verifyDeviceRegistration(deviceId: string, authToken?: string, installationId?: string) {
+    const res = await fetch(getApiEndpoint('/devices/verify-registration'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, authToken, installationId })
+    });
+    return handleResponse<any>(res);
+  },
+
   async getDevice(id: string) {
     const res = await fetchWithAuth(getApiEndpoint(`/devices/${id}`));
     return handleResponse<{ device: any }>(res);

@@ -15,7 +15,8 @@ import {
   Edit2,
   Lock,
   Cpu,
-  HardDrive
+  HardDrive,
+  AlertCircle
 } from 'lucide-react';
 import { api, getWsBaseUrl } from '../services/api';
 import { useAuth } from '../context/AuthContext';
@@ -62,16 +63,19 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   const { user } = useAuth();
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   const fetchDevices = async () => {
     try {
+      setFetchError(null);
       const res = await api.getDevices();
-      setDevices(res.devices);
-    } catch (err) {
+      setDevices(res.devices || []);
+    } catch (err: any) {
       console.error('Failed to load devices', err);
+      setFetchError(err.message || 'Unable to load your computers. Please retry.');
     } finally {
       setLoading(false);
     }
@@ -80,8 +84,13 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   useEffect(() => {
     fetchDevices();
 
+    // 15-second background polling fallback to keep status accurate
+    const pollInterval = setInterval(() => {
+      fetchDevices();
+    }, 15000);
+
     // Setup real-time WebSocket dashboard listener
-    if (!user) return;
+    if (!user) return () => clearInterval(pollInterval);
     const wsBase = getWsBaseUrl();
     const ws = new WebSocket(`${wsBase}/ws/dashboard?userId=${user.id}`);
 
@@ -107,6 +116,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
     };
 
     return () => {
+      clearInterval(pollInterval);
       ws.close();
     };
   }, [user]);
@@ -206,6 +216,21 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2 text-blue-400" />
           <p className="text-sm">Querying device registry...</p>
         </div>
+      ) : fetchError ? (
+        <div className="p-12 text-center rounded-2xl bg-red-950/20 border border-red-500/30 text-red-300">
+          <div className="w-12 h-12 rounded-xl bg-red-500/10 text-red-400 border border-red-500/20 flex items-center justify-center mx-auto mb-3">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <h3 className="text-base font-bold text-white mb-1">Unable to load your computers</h3>
+          <p className="text-xs text-red-300 max-w-md mx-auto mb-5">{fetchError}</p>
+          <button
+            onClick={fetchDevices}
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition-all shadow-md shadow-red-600/20"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Retry Connection
+          </button>
+        </div>
       ) : devices.length === 0 ? (
         <div className="p-16 text-center rounded-2xl bg-[#0f1524] border border-gray-800">
           <div className="w-14 h-14 rounded-2xl bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center justify-center mx-auto mb-4">
@@ -215,13 +240,15 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           <p className="text-sm text-gray-400 max-w-md mx-auto mb-6">
             Install the RemoteHub desktop agent on your Windows computer to connect and control it remotely from any browser.
           </p>
-          <button
-            onClick={onAddDevice}
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs sm:text-sm transition-all shadow-md shadow-blue-600/20"
-          >
-            <Plus className="w-4 h-4" />
-            Register Your First Computer
-          </button>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+            <button
+              onClick={onAddDevice}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs sm:text-sm transition-all shadow-md shadow-blue-600/20"
+            >
+              <Plus className="w-4 h-4" />
+              Register Your First Computer
+            </button>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
