@@ -565,23 +565,71 @@ devicesRouter.post('/register', requireAuth, async (req: AuthenticatedRequest, r
 // 5. POST /api/devices/heartbeat (Agent HTTP heartbeat backup)
 devicesRouter.post('/heartbeat', async (req, res) => {
   try {
-    const { deviceId, authToken, metrics, localIp, macAddress } = req.body;
+    const {
+      deviceId,
+      authToken,
+      metrics,
+      localIp,
+      macAddress,
+      installationId,
+      deviceName,
+      accountUserId,
+      accountEmail,
+      accessMethod
+    } = req.body;
+
     if (!deviceId || !authToken) {
       return res.status(401).json({ error: 'Missing device credentials' });
     }
 
-    const device = await queryOne('SELECT * FROM devices WHERE id = ? AND auth_token = ?', [deviceId, authToken]);
+    let device = await queryOne('SELECT * FROM devices WHERE id = ? AND auth_token = ?', [deviceId, authToken]);
     if (!device) {
-      const existingById = await queryOne('SELECT id, user_id FROM devices WHERE id = ?', [deviceId]);
-      if (existingById) {
+      const existingById = await queryOne('SELECT id, user_id, auth_token FROM devices WHERE id = ?', [deviceId]);
+      if (existingById && existingById.auth_token && existingById.auth_token !== authToken) {
         return res.status(401).json({ error: 'Invalid device credentials', code: 'TOKEN_MISMATCH' });
       }
-      return res.status(404).json({
-        error: 'Device not registered on server',
-        code: 'NEEDS_SYNC',
-        deviceId,
-        canRecover: true
-      });
+
+      // If the heartbeat includes accountUserId, auto-restore device registration in this container!
+      if (accountUserId) {
+        const now = Date.now();
+        let owner = await queryOne('SELECT id FROM users WHERE id = ?', [accountUserId]);
+        if (!owner) {
+          const ownerName = (accountEmail || 'User').split('@')[0];
+          await execute(`
+            INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, [accountUserId, ownerName, ownerName, accountEmail || `${accountUserId}@remotehub.internal`, 'DEVICE_HEARTBEAT_USER', now, now]);
+        }
+
+        await execute(`
+          INSERT INTO devices (
+            id, user_id, device_name, operating_system, os, agent_version,
+            device_status, online_status, auth_token, last_seen, local_ip, mac_address,
+            installation_id, access_method, trusted_mode, created_at, registered_at
+          ) VALUES (?, ?, ?, 'Windows', 'Windows', '1.3.4', 'online', 1, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        `, [
+          deviceId,
+          accountUserId,
+          deviceName || 'LOKI',
+          authToken,
+          now,
+          localIp || null,
+          macAddress || null,
+          installationId || null,
+          accessMethod || 'approval',
+          now,
+          now
+        ]);
+
+        device = await queryOne('SELECT * FROM devices WHERE id = ?', [deviceId]);
+      } else {
+        return res.status(404).json({
+          error: 'Device not registered on server',
+          code: 'NEEDS_SYNC',
+          deviceId,
+          canRecover: true
+        });
+      }
     }
 
     const now = Date.now();
@@ -627,12 +675,45 @@ devicesRouter.get('/:id/agent-poll', async (req, res) => {
   try {
     const deviceId = req.params.id;
     const token = req.query.token as string || req.headers.authorization?.replace('Bearer ', '');
+    const accountUserId = req.query.accountUserId as string;
+    const installationId = req.query.installationId as string;
+    const deviceName = req.query.deviceName as string;
 
     if (!deviceId || !token) {
       return res.status(401).json({ error: 'Missing device credentials' });
     }
 
-    const device = await queryOne('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?', [deviceId]);
+    let device = await queryOne('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?', [deviceId]);
+    if (!device && accountUserId) {
+      const now = Date.now();
+      let owner = await queryOne('SELECT id FROM users WHERE id = ?', [accountUserId]);
+      if (!owner) {
+        await execute(`
+          INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [accountUserId, 'User', 'User', `${accountUserId}@remotehub.internal`, 'AGENT_POLL_USER', now, now]);
+      }
+
+      await execute(`
+        INSERT INTO devices (
+          id, user_id, device_name, operating_system, os, agent_version,
+          device_status, online_status, auth_token, last_seen, installation_id,
+          access_method, trusted_mode, created_at, registered_at
+        ) VALUES (?, ?, ?, 'Windows', 'Windows', '1.3.4', 'online', 1, ?, ?, ?, 'approval', 1, ?, ?)
+      `, [
+        deviceId,
+        accountUserId,
+        deviceName || 'LOKI',
+        token,
+        now,
+        installationId || null,
+        now,
+        now
+      ]);
+
+      device = await queryOne('SELECT id, user_id, device_name, auth_token FROM devices WHERE id = ?', [deviceId]);
+    }
+
     if (!device || device.auth_token !== token) {
       return res.status(401).json({ error: 'Invalid device credentials' });
     }

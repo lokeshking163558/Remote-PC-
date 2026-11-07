@@ -226,6 +226,10 @@ namespace RemoteHub.Agent
                     localIp = metrics.IpAddress,
                     macAddress = metrics.MacAddress,
                     installationId = _config.InstallationId,
+                    deviceName = _config.DeviceName,
+                    accountUserId = _config.AccountUserId,
+                    accountEmail = _config.AccountEmail,
+                    accessMethod = _config.AccessMethod,
                     metrics = new
                     {
                         cpuUsage = metrics.CpuUsage,
@@ -286,7 +290,8 @@ namespace RemoteHub.Agent
                 {
                     try
                     {
-                        string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}/agent-poll?token={_config.AuthToken}";
+                        string escDevice = Uri.EscapeDataString(_config.DeviceName);
+                        string url = $"{_config.ServerUrl.TrimEnd('/')}/api/devices/{_config.DeviceId}/agent-poll?token={_config.AuthToken}&installationId={_config.InstallationId}&accountUserId={_config.AccountUserId}&deviceName={escDevice}";
                         var res = await _httpClient.GetAsync(url, ct);
 
                         if (res.IsSuccessStatusCode)

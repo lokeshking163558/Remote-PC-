@@ -436,7 +436,23 @@ authRouter.post('/google', async (req, res) => {
 // 10. GET /api/auth/me (Get profile with auto-recovery)
 authRouter.get('/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const user = await queryOne('SELECT id, name, full_name, email, avatar_url, created_at FROM users WHERE id = ?', [req.user!.id]);
+    let user = await queryOne('SELECT id, name, full_name, email, avatar_url, created_at FROM users WHERE id = ?', [req.user!.id]);
+    if (!user && req.user?.id) {
+      // In serverless multi-container environments where a container just spun up:
+      // req.user has already been cryptographically validated by requireAuth (via verifyToken with server secret).
+      // Auto-restore this user into this container's database so sessions persist across all containers!
+      const now = Date.now();
+      const userName = req.user.fullName || req.user.email?.split('@')[0] || 'User';
+      const safeEmail = req.user.email || `${req.user.id}@remotehub.internal`;
+
+      await execute(`
+        INSERT INTO users (id, name, full_name, email, password_hash, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [req.user.id, userName, userName, safeEmail, 'SESSION_RESTORED', now, now]);
+
+      user = await queryOne('SELECT id, name, full_name, email, avatar_url, created_at FROM users WHERE id = ?', [req.user.id]);
+    }
+
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }

@@ -280,17 +280,19 @@ export const App: React.FC = () => {
     );
   }
 
-  // Authenticated views
+  // Authenticated views: Ensure we transition cleanly from login/register into the dashboard
+  const activeView = (currentView === 'login' || currentView === 'register') ? 'dashboard' : currentView;
+
   return (
     <div className="min-h-screen bg-[#0a0d14] flex flex-col">
       <Navbar
-        currentView={currentView}
+        currentView={activeView}
         setCurrentView={setCurrentView}
         onAddDevice={() => setShowAddDevice(true)}
       />
 
       <main className="flex-1">
-        {currentView === 'dashboard' && (
+        {activeView === 'dashboard' && (
           <DashboardPage
             onConnectDevice={handleConnectDevice}
             onOpenDetails={(deviceId) => setSelectedDeviceForDetails(deviceId)}
@@ -299,9 +301,9 @@ export const App: React.FC = () => {
           />
         )}
 
-        {currentView === 'sessions' && <SessionsPage />}
+        {activeView === 'sessions' && <SessionsPage />}
 
-        {currentView === 'settings' && <SettingsPage />}
+        {activeView === 'settings' && <SettingsPage />}
       </main>
 
       {/* PIN Verification Modal */}

@@ -21,8 +21,9 @@ export function getBackendUrl(): string {
     }
   }
 
-  if (typeof window !== 'undefined' && (window.location.hostname.includes('remote-pc-green.vercel.app') || window.location.hostname.includes('vercel.app'))) {
-    return DEFAULT_BACKEND_URL;
+  if (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app')) {
+    // Return empty base to use same-origin /api rewrite, preventing 3rd-party cookie drops in Brave/Safari
+    return '';
   }
 
   return DEFAULT_BACKEND_URL;
@@ -30,7 +31,7 @@ export function getBackendUrl(): string {
 
 export function resetBackendUrl(): string {
   localStorage.removeItem('remotehub_backend_url');
-  return DEFAULT_BACKEND_URL;
+  return '';
 }
 
 export async function testBackendHealth(customUrl?: string): Promise<{
@@ -40,10 +41,11 @@ export async function testBackendHealth(customUrl?: string): Promise<{
   status?: string;
   error?: string;
 }> {
-  const target = customUrl ? customUrl.trim().replace(/\/$/, '') : getBackendUrl();
+  const target = customUrl !== undefined ? customUrl.trim().replace(/\/$/, '') : (getBackendUrl() || (typeof window !== 'undefined' ? window.location.origin : DEFAULT_BACKEND_URL));
   const startTime = Date.now();
   try {
-    const res = await fetch(`${target}/api/health`, {
+    const healthUrl = target ? `${target}/api/health` : '/api/health';
+    const res = await fetch(healthUrl, {
       method: 'GET',
       headers: { Accept: 'application/json' },
       signal: AbortSignal.timeout(6000)
